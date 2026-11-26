@@ -7,7 +7,7 @@
 
 # DropBridge
 
-**在 Windows 上接收 iPhone 隔空投送的文件**
+**在 Windows 上与 iPhone 双向隔空投送（AirDrop）文件**
 
 iPhone 不用装 App · 不依赖 WSL2 或虚拟机 · 不影响电脑原有 Wi-Fi
 
@@ -42,13 +42,11 @@ DropBridge 是一个常驻托盘的程序。它通过 WinUSB 直接驱动一张�
 3. 首次运行会询问并通过 UAC 把网卡的 Wi-Fi 接口换成 WinUSB（8821CU 只换 **MI_02**，MI_00/MI_01 不动；8811CU 为单接口设备），日志在 `data\logs\driver-install.txt`。失败时可用托盘「安装驱动（首次使用）」重试，或按 `setup\README.txt`（仓库中 [packaging/setup/README.txt](packaging/setup/README.txt)）用 Zadig 手动绑定。
 4. 等待 40–90 秒网卡初始化，托盘提示就绪。首次成功启动会自动开启「开机自启」。
 
-### 接收文件
+### 接收与发送文件
 
-iPhone 分享 → 隔空投送 → 选 **DropBridge**。
-
-- 文件默认存到 `data\received\`，双击托盘图标即可打开。
-- 收到后弹出通知，图片可一键复制到剪贴板。
-- 实况照片和 HEIC 默认额外生成 `<原名>-still.jpg`，方便直接查看。
+- **接收（iPhone → 电脑）**：iPhone 分享 → 隔空投送 → 选 **DropBridge**（无需改 iPhone 接收范围）。文件默认存到 `data\received\`，双击托盘图标即可打开。
+- **发送（电脑 → iPhone）**：iPhone 临时将隔空投送设为 **「所有人（10 分钟）」**，然后右键托盘图标选 **「发送文件到 iPhone…」**（可拖拽文件），或在托盘开启 **「添加到右键『发送到』菜单」** 后从资源管理器直接发送。
+- 收到图片后弹出通知，可一键复制到剪贴板；实况照片和 HEIC 默认额外生成 `<原名>-still.jpg`，方便直接查看。
 
 ### 托盘菜单
 

@@ -1,5 +1,11 @@
 # 工作记录 / 下一位 Agent 交接
 
+## 2026-11-26：Q73/Q74 双向传输（PC → iPhone 发送匿名 TLS 与托盘发送窗口）
+
+- **根因与协议修复（Q73）**：对照 AirDrop 协议确认 iPhone 在「所有人（10 分钟）」模式下接受**无客户端证书**的匿名 TLS 连接，而原 `tools/airdrop_send.py` 复用 `sender.client_context()` 主动出示自签证书会触发证书拒绝。改为 `anonymous_client_context()`，并新增打包路径探测、`--json` 交互会话模式与端口刷新重试。
+- **前端与系统入口（Q74）**：`Supervisor.AllowSend` 默认开启（8772 出站代理）；`src/supervisor/Program.cs` 新增 `SendFilesDialog`（拖拽文件、附近设备实时列表、「仅限联系人」提示条、发送进度与取消）、托盘「发送文件到 iPhone…」、`--send` / `dropbridge://send` 命名管道唤醒、以及 `%APPDATA%\Microsoft\Windows\SendTo\DropBridge.lnk` 开关；`Package-Distributable.ps1` 与 `Package-Headless.ps1` 同步复制 `airdrop_send.py`。
+- **验证**：`tools/test_airdrop_send.py`（模拟 15353 mDNS + 8772 `CONNECT` 代理 + 拒绝客户端证书的模拟 iPhone HTTPS 服务端）CLI 与 `--json` 全部通过且文件 SHA-256 一致；`Build-Supervisor.ps1 -Test`（含 `BuildSendUri`/`FilesFromSendUri`/`SendHelpers` 新单测）全部通过。尚未进行真机无线发送实测（待硬件授权）。
+
 ## 2026-11-26：Q72 Issue #11 安装前网卡识别确认弹窗与一键回退
 
 - **改动**：
