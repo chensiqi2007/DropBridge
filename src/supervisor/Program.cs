@@ -1356,6 +1356,16 @@ internal static class RadioBinding
         return null;
     }
 
+    [System.Runtime.InteropServices.DllImport("newdev.dll", CharSet = System.Runtime.InteropServices.CharSet.Unicode, SetLastError = true)]
+    private static extern bool UpdateDriverForPlugAndPlayDevices(
+        IntPtr hwndParent,
+        string hardwareId,
+        string fullInfPath,
+        uint installFlags,
+        out bool rebootRequired);
+
+    private const uint InstallFlagForce = 0x00000001;
+
     /// <summary>
     /// Bind the target Wi-Fi interface to WinUSB, elevating once if needed.
     /// Idempotent: when already on WinUSB this returns 0 without touching anything.
@@ -1422,11 +1432,23 @@ internal static class RadioBinding
         code = Run("certutil.exe", "-addstore -f TrustedPublisher \"" + cer + "\"", logPath);
         if (code != 0) return 1;
         code = Run("pnputil.exe", "/add-driver \"" + inf + "\" /install", logPath);
-        if (code != 0) return 1;
-
         service = Service(out matched);
+        if (!Bound(service) && matched != null)
+        {
+            string hwid = matched.Prefix.TrimEnd('\\');
+            bool rebootRequired;
+            bool ok = UpdateDriverForPlugAndPlayDevices(IntPtr.Zero, hwid, inf, InstallFlagForce, out rebootRequired);
+            int err = System.Runtime.InteropServices.Marshal.GetLastWin32Error();
+            Log(logPath, "install: UpdateDriverForPlugAndPlayDevices(" + hwid + ", FORCE) -> " +
+                         ok + " (err=" + err + ", reboot=" + rebootRequired + ")");
+            service = Service(out matched);
+        }
+        else if (code != 0 && !Bound(service))
+        {
+            return 1;
+        }
         bool bound = Bound(service);
-        Log(logPath, "install: after pnputil, " + label + " service=" + (service ?? "<absent>"));
+        Log(logPath, "install: after install, " + label + " service=" + (service ?? "<absent>"));
         return bound ? 0 : 1;
     }
 
