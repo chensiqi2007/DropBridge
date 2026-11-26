@@ -935,6 +935,8 @@ internal sealed class Supervisor
                 // even when that death is a force kill (Q55).
                 { "AIRBRIDGE_PARENT_PID",
                   System.Diagnostics.Process.GetCurrentProcess().Id.ToString() },
+                // Pin the radio to whichever supported adapter is present (Q71).
+                { "AIRBRIDGE_PID", RadioBinding.DetectedPidHex() },
             },
             _root, "listening on 127.0.0.1:49876", _log, OnChildLine);
         var bridge = new Child("bridge", BridgePath(), "",
@@ -1063,12 +1065,54 @@ internal sealed class Supervisor
     }
 }
 
+internal sealed class RadioTarget
+{
+    public readonly string Name;
+    public readonly string PidHex;
+    public readonly string Prefix;
+    public readonly string WqlLike;
+    public readonly string InterfaceLabel;
+
+    public RadioTarget(string name, string pidHex, string prefix, string wqlLike, string interfaceLabel)
+    {
+        Name = name;
+        PidHex = pidHex;
+        Prefix = prefix;
+        WqlLike = wqlLike;
+        InterfaceLabel = interfaceLabel;
+    }
+
+    public bool MatchesDeviceId(string deviceId)
+    {
+        return !string.IsNullOrEmpty(deviceId) &&
+               deviceId.StartsWith(Prefix, StringComparison.OrdinalIgnoreCase);
+    }
+}
+
 internal static class RadioBinding
 {
-    // One interface only: the Wi-Fi half of the RTL8821CU. MI_00 (Bluetooth) and
-    // the composite parent are never named here. WQL treats a backslash as an
-    // escape, so the runtime string needs doubled backslashes.
-    private const string Pattern = "USB\\\\VID_0BDA&PID_C820&MI_02";
+    // Supported adapters:
+    // - RTL8821CU (0bda:c820): composite device; only MI_02 (Wi-Fi) is bound,
+    //   never MI_00 (Bluetooth) or the composite parent.
+    // - RTL8811CU (0bda:c811): single-interface Wi-Fi adapter (no MI_xx); the
+    //   trailing backslash keeps future &MI_xx variants from matching here.
+    internal static readonly RadioTarget[] Targets =
+    {
+        new RadioTarget("RTL8821CU", "0xc820", @"USB\VID_0BDA&PID_C820&MI_02\",
+            "USB\\\\VID_0BDA&PID_C820&MI_02\\\\%", "MI_02"),
+        new RadioTarget("RTL8811CU", "0xc811", @"USB\VID_0BDA&PID_C811\",
+            "USB\\\\VID_0BDA&PID_C811\\\\%", "Wi-Fi"),
+    };
+
+    internal static RadioTarget MatchTarget(string deviceId)
+    {
+        if (string.IsNullOrEmpty(deviceId)) return null;
+        foreach (RadioTarget target in Targets)
+        {
+            if (target.MatchesDeviceId(deviceId)) return target;
+        }
+        return null;
+    }
 
     internal static bool IsAdmin()
     {
@@ -1084,18 +1128,46 @@ internal static class RadioBinding
         }
     }
 
-    /// <summary>Service of the MI_02 interface, "" when present without one, null when absent.</summary>
     internal static string Service()
     {
+        RadioTarget unused;
+        return Service(out unused);
+    }
+
+    /// <summary>Service of the matched Wi-Fi target, "" when present without one, null when absent.</summary>
+    internal static string Service(out RadioTarget matched)
+    {
+        matched = null;
         try
         {
-            using (var searcher = new ManagementObjectSearcher(
-                       "SELECT DeviceID, Service FROM Win32_PnPEntity WHERE DeviceID LIKE '" + Pattern + "%'"))
+            var clauses = new List<string>();
+            foreach (RadioTarget target in Targets)
             {
+                clauses.Add("DeviceID LIKE '" + target.WqlLike + "'");
+            }
+            string query = "SELECT DeviceID, Service FROM Win32_PnPEntity WHERE " +
+                           string.Join(" OR ", clauses);
+            using (var searcher = new ManagementObjectSearcher(query))
+            {
+                var found = new List<KeyValuePair<RadioTarget, string>>();
                 foreach (ManagementObject item in searcher.Get())
                 {
+                    string deviceId = item["DeviceID"] as string;
+                    RadioTarget target = MatchTarget(deviceId);
+                    if (target == null) continue;
                     string service = item["Service"] as string;
-                    return service ?? string.Empty;
+                    found.Add(new KeyValuePair<RadioTarget, string>(target, service ?? string.Empty));
+                }
+                foreach (RadioTarget preferred in Targets)
+                {
+                    foreach (var entry in found)
+                    {
+                        if (entry.Key == preferred)
+                        {
+                            matched = entry.Key;
+                            return entry.Value;
+                        }
+                    }
                 }
             }
         }
@@ -1103,6 +1175,13 @@ internal static class RadioBinding
         {
         }
         return null;
+    }
+
+    internal static string DetectedPidHex()
+    {
+        RadioTarget matched;
+        string service = Service(out matched);
+        return (service != null && matched != null) ? matched.PidHex : null;
     }
 
     internal static bool Bound(string service)
@@ -1126,20 +1205,22 @@ internal static class RadioBinding
     }
 
     /// <summary>
-    /// Bind MI_02 to WinUSB, elevating once if needed. Idempotent: when the
-    /// interface is already on WinUSB this returns 0 without touching anything.
+    /// Bind the target Wi-Fi interface to WinUSB, elevating once if needed.
+    /// Idempotent: when already on WinUSB this returns 0 without touching anything.
     /// </summary>
     internal static int Install(string root, bool quiet, string logPath)
     {
-        string service = Service();
+        RadioTarget matched;
+        string service = Service(out matched);
         if (service == null)
         {
-            Log(logPath, "install: MI_02 not present; plug the card in first");
+            Log(logPath, "install: supported adapter (8821CU/8811CU) not present; plug the card in first");
             return 3;
         }
+        string label = matched != null ? (matched.Name + " " + matched.InterfaceLabel) : "Wi-Fi";
         if (Bound(service))
         {
-            Log(logPath, "install: already bound to WinUSB; nothing to do");
+            Log(logPath, "install: " + label + " already bound to WinUSB; nothing to do");
             return 0;
         }
         if (!IsAdmin())
@@ -1191,9 +1272,9 @@ internal static class RadioBinding
         code = Run("pnputil.exe", "/add-driver \"" + inf + "\" /install", logPath);
         if (code != 0) return 1;
 
-        service = Service();
+        service = Service(out matched);
         bool bound = Bound(service);
-        Log(logPath, "install: after pnputil, MI_02 service=" + (service ?? "<absent>"));
+        Log(logPath, "install: after pnputil, " + label + " service=" + (service ?? "<absent>"));
         return bound ? 0 : 1;
     }
 
@@ -2388,7 +2469,7 @@ internal sealed class TrayApp : ApplicationContext
             if (service == null)
             {
                 _icon.ShowBalloonTip(6000, _icon.Text,
-                    "没找到 RTL8821CU 网卡：请直插机箱后面板的 USB 口。", ToolTipIcon.Warning);
+                    "没找到 RTL8821CU / RTL8811CU 网卡：请直插机箱后面板的 USB 口。", ToolTipIcon.Warning);
                 return;
             }
             if (RadioBinding.Bound(service)) return;
@@ -2421,7 +2502,7 @@ internal sealed class TrayApp : ApplicationContext
             }
             else if (code == 3)
             {
-                MessageBox.Show("没找到 RTL8821CU 网卡。\n请直插机箱后面板的 USB 口后重试。",
+                MessageBox.Show("没找到 RTL8821CU / RTL8811CU 网卡。\n请直插机箱后面板的 USB 口后重试。",
                     "DropBridge", MessageBoxButtons.OK, MessageBoxIcon.Warning);
             }
             else
