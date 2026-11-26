@@ -111,6 +111,12 @@ WLAN 2 适配器状态：
 
 之后我会把不含实例路径的摘要整理进 `evidence/hardware-identity.json` 或新的提交证据。
 
+## 9. RTL8811CU（`0bda:c811`）补充说明与回滚基线
+
+- **2026-11-26 本机只读基线**：`USB\VID_0BDA&PID_C811\123456`，非复合设备（无 `MI_xx`，不带蓝牙），当前驱动 `oem302.inf`（Realtek 1030.52.1216.2025，服务 `RtlWlanu`），对应适配器 `WLAN 6`（`Realtek 8811CU Wireless LAN 802.11ac USB NIC`）。
+- **Zadig 绑定目标**：选 `0BDA C811` 整个设备（非复合设备，无 `MI_02` 子接口），目标驱动 `WinUSB`。
+- **回滚**：设备管理器 →「通用串行总线设备」→ 卸载该设备并勾选「删除此设备的驱动程序软件」→ 拔插或 `pnputil /scan-devices`，系统会恢复使用 `oem302.inf` / `RtlWlanu`。若通过 `pnputil` 安装了自建 WinUSB 包，也可先 `pnputil /enum-drivers` 找到对应 `oemNN.inf` 后执行 `pnputil /delete-driver oemNN.inf /uninstall` 再扫描。
+
 ## 8. 边界
 
 - 本步骤只换驱动，不初始化芯片、不加载固件、不发无线帧。

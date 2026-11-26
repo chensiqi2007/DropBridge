@@ -1,5 +1,14 @@
 # 工作记录 / 下一位 Agent 交接
 
+## 2026-11-26：Q71 适配 RTL8811CU（0bda:c811）源码与驱动包
+
+- **本机硬件基线（只读）**：`USB\VID_0BDA&PID_C811\123456`，非复合设备（无 `MI_xx`，无蓝牙），当前驱动 `RtlWlanu` / `oem302.inf`（1030.52.1216.2025），直插 `USB\ROOT_HUB30`；ZeroCD `1a2b` 未出现；主机自带 `Intel(R) Wireless Bluetooth(R)` 与 `Intel(R) Wi-Fi 7 BE200`（主网络不受换驱动影响）。
+- **改动**：
+  - `src/radio_usb/main.cpp`、`tools/usb_probe/usb_probe.c`：未指定 `AIRBRIDGE_PID` / 命令行 PID 时按 `{0xc820, 0xc811}` 依次打开；无需改动 `upstream/devourer`（`find_wifi_interface` 已按端点动态选接口，且上游原就在 8811CU 上实测）。
+  - `src/supervisor/Program.cs`：`RadioBinding` 改为匹配表（`PID_C820&MI_02\` 与 `PID_C811\`），`StartAll` 通过 `AIRBRIDGE_PID` 固定托盘检测到的 PID；新增 `src/supervisor/radio_binding_test.cs` 并在 `tools/Build-Supervisor.ps1 -Test` 运行。
+  - `packaging/driver/airbridge-winusb.inf` 新增 `USB\VID_0BDA&PID_C811` 并用 `tools/Build-DriverPackage.ps1` 重新生成签名 `.cat`/`.cer`；同步更新 `packaging/setup/{Check-Binding.ps1,Bind-WinUSB.cmd,README.txt,licenses/ZADIG.txt}`、`packaging/README.txt`、`tools/Check-Binding.ps1`、`README.md`、`docs/BINDING_RUNBOOK.md`。
+- **验证**：`Build-Supervisor.ps1 -Test` 四项离线测试通过（含 `PASS radio_binding`）；`packaging\setup\Check-Binding.ps1` 与 `tools\Check-Binding.ps1` 均识别 `RTL8811CU` 且正确返回 exit 1（未绑 WinUSB）。尚未换驱动，未运行硬件。
+
 ## 2026-11-10：新增发布前核对清单
 
 - 新增 `docs/RELEASE_CHECKLIST.md`，七部分：Windows 编译与测试、包内容、真机功能（含 Q68–Q70 改动的逐项验证）、干净机器从零安装与卸载回滚、许可证与合规、版本可复现与文档一致、发布动作。全部条目未完成。

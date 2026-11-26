@@ -12,7 +12,7 @@
 iPhone 不用装 App · 不依赖 WSL2 或虚拟机 · 不影响电脑原有 Wi-Fi
 
 [![平台](https://img.shields.io/badge/平台-Windows%2010%20%2F%2011%20x64-0078D4)](#使用)
-[![网卡](https://img.shields.io/badge/网卡-RTL8821CU-555)](#使用)
+[![网卡](https://img.shields.io/badge/网卡-RTL8821CU%20%2F%208811CU-555)](#使用)
 [![状态](https://img.shields.io/badge/状态-内部测试-orange)](#状态与限制)
 [![许可证](https://img.shields.io/badge/许可证-MIT-green)](LICENSE)
 
@@ -22,7 +22,7 @@ iPhone 不用装 App · 不依赖 WSL2 或虚拟机 · 不影响电脑原有 Wi-
 
 ---
 
-DropBridge 是一个常驻托盘的程序。它通过 WinUSB 直接驱动一张专用的 **RTL8821CU USB 无线网卡**，在用户态跑 AWDL（隔空投送底层的无线协议），让 iPhone 把电脑当成普通的隔空投送设备。
+DropBridge 是一个常驻托盘的程序。它通过 WinUSB 直接驱动一张专用的 **RTL8821CU / RTL8811CU USB 无线网卡**，在用户态跑 AWDL（隔空投送底层的无线协议），让 iPhone 把电脑当成普通的隔空投送设备。
 
 ## 使用
 
@@ -31,7 +31,7 @@ DropBridge 是一个常驻托盘的程序。它通过 WinUSB 直接驱动一张�
 | | |
 | --- | --- |
 | 系统 | Windows 10 / 11 x64，系统自带 .NET Framework 4.8 即可 |
-| 网卡 | RTL8821CU，USB ID `0bda:c820`（只验证过这个 ID），建议直插不经 Hub |
+| 网卡 | RTL8821CU（`0bda:c820`，已真机验证）或 RTL8811CU（`0bda:c811`，单接口无蓝牙；已接入代码与驱动包，真机收发待测），建议直插不经 Hub |
 | 权限 | 首次运行需要一次管理员权限，用于安装 WinUSB 驱动 |
 | 蓝牙 | 建议有。用于发 beacon 帮 iPhone 发现电脑，没有也能收但更慢 |
 
@@ -39,7 +39,7 @@ DropBridge 是一个常驻托盘的程序。它通过 WinUSB 直接驱动一张�
 
 1. 把 `DropBridge-portable.zip` 解压到可写目录（如 `D:\DropBridge`，不要放 Program Files）。
 2. 插上网卡，双击 `DropBridge.exe`，程序只在通知区域放一个托盘图标。
-3. 首次运行会询问并通过 UAC 把网卡的 **MI_02（Wi-Fi）接口**换成 WinUSB（MI_00/MI_01 不动），日志在 `data\logs\driver-install.txt`。失败时可用托盘「安装驱动（首次使用）」重试，或按 `setup\README.txt`（仓库中 [packaging/setup/README.txt](packaging/setup/README.txt)）用 Zadig 手动绑定。
+3. 首次运行会询问并通过 UAC 把网卡的 Wi-Fi 接口换成 WinUSB（8821CU 只换 **MI_02**，MI_00/MI_01 不动；8811CU 为单接口设备），日志在 `data\logs\driver-install.txt`。失败时可用托盘「安装驱动（首次使用）」重试，或按 `setup\README.txt`（仓库中 [packaging/setup/README.txt](packaging/setup/README.txt)）用 Zadig 手动绑定。
 4. 等待 40–90 秒网卡初始化，托盘提示就绪。首次成功启动会自动开启「开机自启」。
 
 ### 接收文件
@@ -121,7 +121,7 @@ DropBridge\
 ### 工作原理
 
 ```text
-iPhone ──AWDL──▶ RTL8821CU（MI_02 = WinUSB）
+iPhone ──AWDL──▶ RTL8821CU（MI_02 = WinUSB）/ RTL8811CU（WinUSB）
   └▶ airbridge_radio.exe    devourer 用户态驱动（libusb），TCP 49876
   └▶ radio_pipe_bridge.exe  命名管道 ↔ TCP
   └▶ awdld.exe              OWL 的 AWDL 控制面（打补丁，走 IPC 后端）
