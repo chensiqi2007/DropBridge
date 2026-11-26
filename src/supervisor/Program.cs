@@ -646,8 +646,14 @@ internal sealed class Supervisor
     private string BridgePath() { return Path.Combine(_backend, "radio_pipe_bridge.exe"); }
     private string NetdPath() { return Path.Combine(_backend, "awdl_netd.exe"); }
     private string AwdldPath() { return Path.Combine(_backend, "awdld.exe"); }
-    private string PythonPath() { return Path.Combine(_backend, "python", "python.exe"); }
-    private string ReceiverPath() { return Path.Combine(_backend, "airdrop", "receiver.py"); }
+    internal string PythonPath() { return Path.Combine(_backend, "python", "python.exe"); }
+    internal string ReceiverPath() { return Path.Combine(_backend, "airdrop", "receiver.py"); }
+    internal string SenderPath()
+    {
+        string packaged = Path.Combine(_backend, "airdrop", "airdrop_send.py");
+        if (File.Exists(packaged)) return packaged;
+        return Path.GetFullPath(Path.Combine(_root, "tools", "airdrop_send.py"));
+    }
     private string AddressFile() { return Path.Combine(_data, "awdl_netd.addr"); }
 
     public List<string> Validate()
@@ -1934,6 +1940,521 @@ internal sealed class DeviceNameDialog : Form
     }
 }
 
+internal static class SendHelpers
+{
+    public static string ValidateSendFiles(IEnumerable<string> paths, out List<string> valid)
+    {
+        valid = new List<string>();
+        var seenNames = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+        foreach (string p in paths)
+        {
+            if (string.IsNullOrEmpty(p) || !File.Exists(p))
+            {
+                return "文件不存在：" + (p ?? "");
+            }
+            string name = Path.GetFileName(p);
+            if (!seenNames.Add(name))
+            {
+                return "存在同名文件，无法同时发送：" + name;
+            }
+            valid.Add(p);
+        }
+        if (valid.Count == 0) return "请先添加至少一个文件";
+        return null;
+    }
+
+    public static string JsonGetString(string json, string key)
+    {
+        if (string.IsNullOrEmpty(json) || string.IsNullOrEmpty(key)) return null;
+        string pattern = "\"" + key + "\"";
+        int idx = json.IndexOf(pattern, StringComparison.Ordinal);
+        if (idx < 0) return null;
+        int colon = json.IndexOf(':', idx + pattern.Length);
+        if (colon < 0) return null;
+        int i = colon + 1;
+        while (i < json.Length && char.IsWhiteSpace(json[i])) i++;
+        if (i >= json.Length || json[i] != '"') return null;
+        i++;
+        var sb = new StringBuilder();
+        while (i < json.Length)
+        {
+            char c = json[i++];
+            if (c == '"') return sb.ToString();
+            if (c == '\\' && i < json.Length)
+            {
+                char next = json[i++];
+                if (next == '"' || next == '\\' || next == '/') sb.Append(next);
+                else if (next == 'n') sb.Append('\n');
+                else if (next == 'r') sb.Append('\r');
+                else if (next == 't') sb.Append('\t');
+                else if (next == 'u' && i + 4 <= json.Length)
+                {
+                    int code;
+                    if (int.TryParse(json.Substring(i, 4), System.Globalization.NumberStyles.HexNumber,
+                            System.Globalization.CultureInfo.InvariantCulture, out code))
+                    {
+                        sb.Append((char)code);
+                        i += 4;
+                    }
+                }
+                else sb.Append(next);
+            }
+            else
+            {
+                sb.Append(c);
+            }
+        }
+        return null;
+    }
+
+    public static long JsonGetLong(string json, string key, long fallback)
+    {
+        if (string.IsNullOrEmpty(json) || string.IsNullOrEmpty(key)) return fallback;
+        string pattern = "\"" + key + "\"";
+        int idx = json.IndexOf(pattern, StringComparison.Ordinal);
+        if (idx < 0) return fallback;
+        int colon = json.IndexOf(':', idx + pattern.Length);
+        if (colon < 0) return fallback;
+        int i = colon + 1;
+        while (i < json.Length && char.IsWhiteSpace(json[i])) i++;
+        int start = i;
+        if (i < json.Length && json[i] == '-') i++;
+        while (i < json.Length && char.IsDigit(json[i])) i++;
+        if (i == start) return fallback;
+        long val;
+        if (long.TryParse(json.Substring(start, i - start), out val)) return val;
+        return fallback;
+    }
+
+    public static string JsonEscape(string s)
+    {
+        if (s == null) return "";
+        var sb = new StringBuilder(s.Length + 8);
+        foreach (char c in s)
+        {
+            if (c == '\\') sb.Append("\\\\");
+            else if (c == '"') sb.Append("\\\"");
+            else if (c == '\r') sb.Append("\\r");
+            else if (c == '\n') sb.Append("\\n");
+            else if (c == '\t') sb.Append("\\t");
+            else sb.Append(c);
+        }
+        return sb.ToString();
+    }
+}
+
+internal sealed class SendFilesDialog : Form
+{
+    private sealed class PeerItem
+    {
+        public string Id;
+        public string Name;
+        public string Model;
+
+        public override string ToString()
+        {
+            return string.IsNullOrEmpty(Model) ? Name : (Name + " (" + Model + ")");
+        }
+    }
+
+    private readonly Supervisor _supervisor;
+    private readonly Settings _prefs;
+    private readonly List<string> _files = new List<string>();
+    private readonly ListBox _fileList;
+    private readonly ListBox _peerList;
+    private readonly Label _shyLabel;
+    private readonly Label _statusLabel;
+    private readonly ProgressBar _progress;
+    private readonly Button _sendButton;
+    private readonly Button _cancelButton;
+    private Process _proc;
+    private bool _sending;
+
+    public SendFilesDialog(Supervisor supervisor, Settings prefs, string[] initialFiles)
+    {
+        _supervisor = supervisor;
+        _prefs = prefs;
+
+        Text = "DropBridge — 发送文件到 iPhone";
+        FormBorderStyle = FormBorderStyle.FixedDialog;
+        MaximizeBox = false;
+        StartPosition = FormStartPosition.CenterScreen;
+        AutoScaleMode = AutoScaleMode.Font;
+        ClientSize = new Size(520, 470);
+        AllowDrop = true;
+
+        var fileLabel = new Label
+        {
+            Text = "待发送文件（支持直接拖拽文件到窗口内）：",
+            Location = new Point(16, 14),
+            Size = new Size(488, 20),
+        };
+
+        _fileList = new ListBox
+        {
+            Location = new Point(16, 36),
+            Size = new Size(488, 96),
+            HorizontalScrollbar = true,
+        };
+
+        var addBtn = new Button { Text = "添加文件…", Location = new Point(16, 138), Size = new Size(92, 28) };
+        var rmBtn = new Button { Text = "移除选中", Location = new Point(114, 138), Size = new Size(86, 28) };
+        var clrBtn = new Button { Text = "清空", Location = new Point(206, 138), Size = new Size(64, 28) };
+
+        var peerLabel = new Label
+        {
+            Text = "附近的接收设备（请让 iPhone 隔空投送保持「所有人 10 分钟」）：",
+            Location = new Point(16, 178),
+            Size = new Size(488, 20),
+        };
+
+        _peerList = new ListBox
+        {
+            Location = new Point(16, 200),
+            Size = new Size(488, 108),
+        };
+
+        _shyLabel = new Label
+        {
+            Text = "提示：检测到附近有 Apple 设备开启了「仅限联系人」，请在 iPhone 控制中心临时设为「所有人（10 分钟）」。",
+            ForeColor = Color.FromArgb(146, 64, 14),
+            BackColor = Color.FromArgb(254, 243, 199),
+            Padding = new Padding(6, 4, 6, 4),
+            Location = new Point(16, 314),
+            Size = new Size(488, 38),
+            Visible = false,
+        };
+
+        _statusLabel = new Label
+        {
+            Text = "正在搜索附近设备…",
+            Location = new Point(16, 360),
+            Size = new Size(488, 22),
+        };
+
+        _progress = new ProgressBar
+        {
+            Location = new Point(16, 386),
+            Size = new Size(488, 20),
+            Minimum = 0,
+            Maximum = 100,
+        };
+
+        _sendButton = new Button
+        {
+            Text = "发送给选中设备",
+            Enabled = false,
+            Location = new Point(186, 422),
+            Size = new Size(124, 30),
+        };
+
+        _cancelButton = new Button
+        {
+            Text = "取消发送",
+            Enabled = false,
+            Location = new Point(316, 422),
+            Size = new Size(92, 30),
+        };
+
+        var closeButton = new Button
+        {
+            Text = "关闭",
+            Location = new Point(414, 422),
+            Size = new Size(90, 30),
+        };
+
+        addBtn.Click += delegate { PickFiles(); };
+        rmBtn.Click += delegate { RemoveSelected(); };
+        clrBtn.Click += delegate { _files.Clear(); RefreshFiles(); };
+        _peerList.SelectedIndexChanged += delegate { UpdateButtons(); };
+        _sendButton.Click += delegate { StartSend(); };
+        _cancelButton.Click += delegate { CancelSend(); };
+        closeButton.Click += delegate { Close(); };
+
+        DragEnter += delegate(object s, DragEventArgs e)
+        {
+            if (e.Data != null && e.Data.GetDataPresent(DataFormats.FileDrop))
+                e.Effect = DragDropEffects.Copy;
+        };
+        DragDrop += delegate(object s, DragEventArgs e)
+        {
+            if (e.Data == null) return;
+            string[] dropped = e.Data.GetData(DataFormats.FileDrop) as string[];
+            if (dropped != null) AddPaths(dropped);
+        };
+
+        Controls.Add(fileLabel);
+        Controls.Add(_fileList);
+        Controls.Add(addBtn);
+        Controls.Add(rmBtn);
+        Controls.Add(clrBtn);
+        Controls.Add(peerLabel);
+        Controls.Add(_peerList);
+        Controls.Add(_shyLabel);
+        Controls.Add(_statusLabel);
+        Controls.Add(_progress);
+        Controls.Add(_sendButton);
+        Controls.Add(_cancelButton);
+        Controls.Add(closeButton);
+
+        if (initialFiles != null) AddPaths(initialFiles);
+        Shown += delegate { StartHelper(); };
+        FormClosing += delegate { StopHelper(); };
+    }
+
+    private void AddPaths(string[] paths)
+    {
+        foreach (string p in paths)
+        {
+            if (!string.IsNullOrEmpty(p) && File.Exists(p) && !_files.Contains(p))
+            {
+                _files.Add(p);
+            }
+        }
+        RefreshFiles();
+    }
+
+    private void PickFiles()
+    {
+        using (var dlg = new OpenFileDialog { Multiselect = true, Title = "选择要发送到 iPhone 的文件" })
+        {
+            if (dlg.ShowDialog() == DialogResult.OK) AddPaths(dlg.FileNames);
+        }
+    }
+
+    private void RemoveSelected()
+    {
+        int idx = _fileList.SelectedIndex;
+        if (idx >= 0 && idx < _files.Count)
+        {
+            _files.RemoveAt(idx);
+            RefreshFiles();
+        }
+    }
+
+    private void RefreshFiles()
+    {
+        _fileList.Items.Clear();
+        foreach (string f in _files)
+        {
+            long len = 0;
+            try { len = new FileInfo(f).Length; }
+            catch (Exception) { }
+            string sizeStr = len >= 1048576
+                ? string.Format("{0:0.0} MB", len / 1048576.0)
+                : string.Format("{0:0} KB", Math.Max(1, len / 1024));
+            _fileList.Items.Add(Path.GetFileName(f) + "  (" + sizeStr + ")");
+        }
+        UpdateButtons();
+    }
+
+    private void UpdateButtons()
+    {
+        _sendButton.Enabled = !_sending && _files.Count > 0 && _peerList.SelectedItem != null && _proc != null;
+        _cancelButton.Enabled = _sending;
+    }
+
+    private void StartHelper()
+    {
+        string python = _supervisor.PythonPath();
+        string script = _supervisor.SenderPath();
+        if (!File.Exists(python) || !File.Exists(script))
+        {
+            _statusLabel.Text = "缺少发送组件：" + script;
+            return;
+        }
+        var psi = new ProcessStartInfo(python,
+            "-u " + Supervisor.QuoteArgument(script) +
+            " --json --name " + Supervisor.QuoteArgument(_prefs.DeviceName))
+        {
+            UseShellExecute = false,
+            CreateNoWindow = true,
+            RedirectStandardInput = true,
+            RedirectStandardOutput = true,
+            RedirectStandardError = true,
+            StandardOutputEncoding = Encoding.UTF8,
+            StandardErrorEncoding = Encoding.UTF8,
+        };
+        try
+        {
+            _proc = Process.Start(psi);
+            ChildJob.Add(_proc);
+            _proc.OutputDataReceived += delegate(object s, DataReceivedEventArgs e)
+            {
+                if (!string.IsNullOrEmpty(e.Data)) OnJsonLine(e.Data);
+            };
+            _proc.BeginOutputReadLine();
+            _proc.BeginErrorReadLine();
+        }
+        catch (Exception ex)
+        {
+            _statusLabel.Text = "启动发送助手失败：" + ex.Message;
+        }
+    }
+
+    private void OnJsonLine(string line)
+    {
+        if (IsDisposed || !IsHandleCreated) return;
+        try
+        {
+            BeginInvoke((MethodInvoker)delegate { HandleEvent(line); });
+        }
+        catch (Exception)
+        {
+        }
+    }
+
+    private void HandleEvent(string line)
+    {
+        string ev = SendHelpers.JsonGetString(line, "event");
+        if (string.IsNullOrEmpty(ev)) return;
+        if (ev == "peer")
+        {
+            string id = SendHelpers.JsonGetString(line, "id");
+            string name = SendHelpers.JsonGetString(line, "name");
+            string model = SendHelpers.JsonGetString(line, "model");
+            for (int i = 0; i < _peerList.Items.Count; i++)
+            {
+                var existing = _peerList.Items[i] as PeerItem;
+                if (existing != null && existing.Id == id) return;
+            }
+            var item = new PeerItem { Id = id, Name = name ?? id, Model = model ?? "" };
+            _peerList.Items.Add(item);
+            if (_peerList.SelectedIndex < 0) _peerList.SelectedIndex = 0;
+            if (!_sending) _statusLabel.Text = "已发现附近设备，选中后点击发送。";
+            UpdateButtons();
+        }
+        else if (ev == "peer_lost")
+        {
+            string id = SendHelpers.JsonGetString(line, "id");
+            for (int i = _peerList.Items.Count - 1; i >= 0; i--)
+            {
+                var existing = _peerList.Items[i] as PeerItem;
+                if (existing != null && existing.Id == id) _peerList.Items.RemoveAt(i);
+            }
+            UpdateButtons();
+        }
+        else if (ev == "shy")
+        {
+            _shyLabel.Visible = true;
+        }
+        else if (ev == "asking")
+        {
+            string peer = SendHelpers.JsonGetString(line, "peer");
+            _progress.Value = 0;
+            _statusLabel.Text = "正在等待 " + (peer ?? "对方") + " 点击“接受”…";
+        }
+        else if (ev == "accepted")
+        {
+            _statusLabel.Text = "对方已接受，正在传输…";
+        }
+        else if (ev == "progress")
+        {
+            long done = SendHelpers.JsonGetLong(line, "done", 0);
+            long total = SendHelpers.JsonGetLong(line, "total", 1);
+            int pct = (int)Math.Min(100, Math.Max(0, done * 100 / Math.Max(total, 1)));
+            _progress.Value = pct;
+            _statusLabel.Text = "正在发送：" + pct + "%";
+        }
+        else if (ev == "sent")
+        {
+            _sending = false;
+            _progress.Value = 100;
+            _statusLabel.Text = "✓ 发送完成！";
+            UpdateButtons();
+        }
+        else if (ev == "declined")
+        {
+            _sending = false;
+            _statusLabel.Text = "对方拒绝了本次发送。";
+            UpdateButtons();
+        }
+        else if (ev == "cancelled")
+        {
+            _sending = false;
+            _statusLabel.Text = "已取消发送。";
+            UpdateButtons();
+        }
+        else if (ev == "error")
+        {
+            _sending = false;
+            string reason = SendHelpers.JsonGetString(line, "reason");
+            _statusLabel.Text = reason ?? "发送失败";
+            UpdateButtons();
+        }
+    }
+
+    private void StartSend()
+    {
+        var peer = _peerList.SelectedItem as PeerItem;
+        if (peer == null || _proc == null || _proc.HasExited) return;
+        List<string> valid;
+        string problem = SendHelpers.ValidateSendFiles(_files, out valid);
+        if (problem != null)
+        {
+            MessageBox.Show(problem, "DropBridge", MessageBoxButtons.OK, MessageBoxIcon.Warning);
+            return;
+        }
+        var fileJson = new List<string>();
+        foreach (string f in valid) fileJson.Add("\"" + SendHelpers.JsonEscape(f) + "\"");
+        string cmd = "{\"do\":\"send\",\"peer\":\"" + SendHelpers.JsonEscape(peer.Id) +
+                     "\",\"files\":[" + string.Join(",", fileJson.ToArray()) + "]}";
+        _sending = true;
+        _progress.Value = 0;
+        UpdateButtons();
+        try
+        {
+            _proc.StandardInput.WriteLine(cmd);
+            _proc.StandardInput.Flush();
+        }
+        catch (Exception ex)
+        {
+            _sending = false;
+            _statusLabel.Text = "发送指令失败：" + ex.Message;
+            UpdateButtons();
+        }
+    }
+
+    private void CancelSend()
+    {
+        if (_proc == null || _proc.HasExited) return;
+        try
+        {
+            _proc.StandardInput.WriteLine("{\"do\":\"cancel\"}");
+            _proc.StandardInput.Flush();
+        }
+        catch (Exception)
+        {
+        }
+    }
+
+    private void StopHelper()
+    {
+        if (_proc == null) return;
+        try
+        {
+            if (!_proc.HasExited)
+            {
+                try
+                {
+                    _proc.StandardInput.WriteLine("{\"do\":\"quit\"}");
+                    _proc.StandardInput.Flush();
+                }
+                catch (Exception) { }
+                if (!_proc.WaitForExit(300)) _proc.Kill();
+            }
+        }
+        catch (Exception)
+        {
+        }
+        finally
+        {
+            _proc.Dispose();
+            _proc = null;
+        }
+    }
+}
+
 internal sealed class TrayApp : ApplicationContext
 {
     private readonly Supervisor _supervisor;
@@ -1943,6 +2464,7 @@ internal sealed class TrayApp : ApplicationContext
     private int _trayPixels;
     private readonly ToolStripMenuItem _status;
     private readonly ToolStripMenuItem _autostart;
+    private readonly ToolStripMenuItem _sendToItem;
     private readonly System.Windows.Forms.Timer _watchdog;
     private SynchronizationContext _ui;
     private FileSystemWatcher _watcher;
@@ -1988,6 +2510,8 @@ internal sealed class TrayApp : ApplicationContext
         _ui = SynchronizationContext.Current as WindowsFormsSynchronizationContext;
         _status = new ToolStripMenuItem("状态：启动中…") { Enabled = false };
         menu.Items.Add(_status);
+        menu.Items.Add(new ToolStripMenuItem("发送文件到 iPhone…", null,
+            delegate { OpenSendDialog(null); }) { ToolTipText = "通过隔空投送把电脑上的文件发给附近的 iPhone（需手机设为「所有人 10 分钟」）" });
         menu.Items.Add(new ToolStripMenuItem("打开接收文件夹", null,
             delegate { OpenFolder(_supervisor.ReceivedDirectory); }));
         _folderItem = new ToolStripMenuItem("接收文件夹：" + ShortPath(_supervisor.ReceivedDirectory) + "…", null,
@@ -2007,7 +2531,10 @@ internal sealed class TrayApp : ApplicationContext
             delegate { RenameDevice(); }) { ToolTipText = "iPhone 隔空投送里显示的名字；改完立即生效并记住" };
         menu.Items.Add(_nameItem);
         menu.Items.Add(new ToolStripMenuItem("清理通知注册信息", null,
-            delegate { RemoveRegistration(); }) { ToolTipText = "删掉开始菜单快捷方式与 dropbridge:// 协议（取消后系统通知里的按钮不再可用）" });
+            delegate { RemoveRegistration(); }) { ToolTipText = "删掉开始菜单快捷方式、dropbridge:// 协议与右键「发送到」快捷方式" });
+        _sendToItem = new ToolStripMenuItem("添加到右键「发送到」菜单", null,
+            delegate { ToggleSendTo(); }) { Checked = AppIdentity.HasSendToShortcut(), ToolTipText = "在资源管理器右键「发送到」里加入 DropBridge" };
+        menu.Items.Add(_sendToItem);
         _beaconWanted = _prefs.Beacon;
         _beaconItem = new ToolStripMenuItem("蓝牙 beacon（帮 iPhone 发现这台电脑）", null,
             delegate { ToggleBeacon(); }) { Checked = _beaconWanted, ToolTipText = "周期性发送 Apple 的 AirDrop 蓝牙广播，让 iPhone 的 AWDL 保持唤醒；关掉后手机可能看不到本机" };
@@ -2325,9 +2852,15 @@ internal sealed class TrayApp : ApplicationContext
         });
     }
 
-    /* Q62: the toast button launched us with dropbridge://copy?file=... */
+    /* Q62/Q74: handle dropbridge://copy?file=... or dropbridge://send?file=... */
     private void HandleActivation(string uri)
     {
+        if (Activation.IsSendUri(uri))
+        {
+            string[] files = Activation.FilesFromSendUri(uri);
+            OpenSendDialog(files);
+            return;
+        }
         string file = Activation.FileFromUri(uri);
         if (string.IsNullOrEmpty(file))
         {
@@ -2375,13 +2908,43 @@ internal sealed class TrayApp : ApplicationContext
         }
     }
 
+    private void OpenSendDialog(string[] initialFiles)
+    {
+        if (!_supervisor.Running)
+        {
+            _icon.ShowBalloonTip(4000, _icon.Text, "后端尚未就绪，请等待网卡初始化完成后再发送。", ToolTipIcon.Warning);
+        }
+        using (var dialog = new SendFilesDialog(_supervisor, _prefs, initialFiles))
+        {
+            dialog.ShowDialog();
+        }
+    }
+
+    private void ToggleSendTo()
+    {
+        bool enable = !AppIdentity.HasSendToShortcut();
+        string error;
+        if (AppIdentity.SetSendToShortcut(enable, out error))
+        {
+            _sendToItem.Checked = AppIdentity.HasSendToShortcut();
+        }
+        else
+        {
+            MessageBox.Show("设置右键「发送到」菜单失败：" + (error ?? "未知错误"),
+                "DropBridge", MessageBoxButtons.OK, MessageBoxIcon.Warning);
+        }
+    }
+
     private void RemoveRegistration()
     {
-        if (MessageBox.Show("删除开始菜单快捷方式和 dropbridge:// 协议？删除后系统通知里的按钮将不再可用。",
+        if (MessageBox.Show("删除开始菜单快捷方式、dropbridge:// 协议和右键「发送到」菜单项？",
                 "清理通知注册信息", MessageBoxButtons.YesNo, MessageBoxIcon.Question) != DialogResult.Yes)
         {
             return;
         }
+        string unused;
+        AppIdentity.SetSendToShortcut(false, out unused);
+        if (_sendToItem != null) _sendToItem.Checked = false;
         string error;
         bool removed = AppIdentity.RemoveRegistration(_supervisor.Root, out error);
         LogLine("notification registration removed: " + removed +
@@ -3754,6 +4317,67 @@ internal static class AppIdentity
         return RunScript(root, "register.ps1", "", out error);
     }
 
+    public static string SendToLinkPath()
+    {
+        return Path.Combine(
+            Environment.GetFolderPath(Environment.SpecialFolder.SendTo),
+            "DropBridge.lnk");
+    }
+
+    public static bool HasSendToShortcut()
+    {
+        return File.Exists(SendToLinkPath());
+    }
+
+    public static bool SetSendToShortcut(bool enable, out string error)
+    {
+        error = null;
+        string linkPath = SendToLinkPath();
+        try
+        {
+            if (!enable)
+            {
+                if (File.Exists(linkPath)) File.Delete(linkPath);
+                return true;
+            }
+            string exe = Application.ExecutablePath;
+            string script =
+                "$w = New-Object -ComObject WScript.Shell; " +
+                "$s = $w.CreateShortcut('" + linkPath.Replace("'", "''") + "'); " +
+                "$s.TargetPath = '" + exe.Replace("'", "''") + "'; " +
+                "$s.Arguments = '--send'; " +
+                "$s.WorkingDirectory = '" + Path.GetDirectoryName(exe).Replace("'", "''") + "'; " +
+                "$s.Description = '使用 DropBridge 隔空投送发送文件'; " +
+                "$s.Save()";
+            var start = new ProcessStartInfo("powershell.exe",
+                "-NoProfile -NonInteractive -Command \"" + script.Replace("\"", "\\\"") + "\"")
+            {
+                UseShellExecute = false,
+                CreateNoWindow = true,
+                RedirectStandardError = true,
+                RedirectStandardOutput = true,
+            };
+            int exitCode;
+            string stderr;
+            if (!HiddenProcess.Run(start, 15000, out exitCode, out stderr))
+            {
+                error = "timed out";
+                return false;
+            }
+            if (exitCode != 0)
+            {
+                error = stderr;
+                return false;
+            }
+            return File.Exists(linkPath);
+        }
+        catch (Exception ex)
+        {
+            error = ex.Message;
+            return false;
+        }
+    }
+
     public static bool RemoveRegistration(string root, out string error)
     {
         error = null;
@@ -3864,6 +4488,53 @@ internal static class Activation
         });
         thread.IsBackground = true;
         thread.Start();
+    }
+
+    public static bool IsSendUri(string uri)
+    {
+        return !string.IsNullOrEmpty(uri) &&
+               uri.StartsWith(Scheme + "send", StringComparison.OrdinalIgnoreCase);
+    }
+
+    public static string BuildSendUri(string[] files)
+    {
+        var sb = new StringBuilder(Scheme);
+        sb.Append("send?");
+        if (files != null)
+        {
+            bool first = true;
+            foreach (string f in files)
+            {
+                if (string.IsNullOrEmpty(f)) continue;
+                if (!first) sb.Append('&');
+                sb.Append("file=");
+                sb.Append(Uri.EscapeDataString(f));
+                first = false;
+            }
+        }
+        return sb.ToString();
+    }
+
+    public static string[] FilesFromSendUri(string uri)
+    {
+        var list = new List<string>();
+        try
+        {
+            var parsed = new Uri(uri);
+            string query = parsed.Query.TrimStart('?');
+            foreach (string pair in query.Split('&'))
+            {
+                int at = pair.IndexOf('=');
+                if (at <= 0) continue;
+                if (!pair.Substring(0, at).Equals("file", StringComparison.OrdinalIgnoreCase)) continue;
+                string decoded = Uri.UnescapeDataString(pair.Substring(at + 1).Replace("+", "%2B"));
+                if (!string.IsNullOrEmpty(decoded)) list.Add(decoded);
+            }
+        }
+        catch (Exception)
+        {
+        }
+        return list.ToArray();
     }
 
     /* dropbridge://copy?file=<url encoded path> */
@@ -4050,6 +4721,18 @@ internal static class Program
             PendingActivation = activation;
             args = new string[0];
         }
+        else if (args.Length > 0 && args[0] == "--send")
+        {
+            var sendFiles = new List<string>();
+            for (int i = 1; i < args.Length; i++)
+            {
+                if (!string.IsNullOrEmpty(args[i])) sendFiles.Add(args[i]);
+            }
+            string sendUri = Activation.BuildSendUri(sendFiles.ToArray());
+            if (Activation.Send(sendUri)) return 0;
+            PendingActivation = sendUri;
+            args = new string[0];
+        }
 
         string rootArgument = null;
         string output = null;
@@ -4061,7 +4744,7 @@ internal static class Program
         int width = 20;
         string channelSequence = "social";
         bool tcpMerge = true;
-        bool allowSend = false;
+        bool allowSend = true;
         int streams = 1;
         string dataArgument = null;
         for (int index = 0; index < args.Length; index++)
@@ -4102,6 +4785,9 @@ internal static class Program
                     break;
                 case "--allow-send":
                     allowSend = true;
+                    break;
+                case "--no-send":
+                    allowSend = false;
                     break;
                 case "--streams":
                     // Diagnostic A/B of what awdld advertises; 1 is the honest
@@ -4180,7 +4866,7 @@ internal static class Program
         string[] knownSwitches =
         {
             "--root", "--data", "--check", "--out", "--smoke", "--auto-exit",
-            "--channel", "--width", "--chanseq", "--no-tcp-merge", "--allow-send",
+            "--channel", "--width", "--chanseq", "--no-tcp-merge", "--allow-send", "--no-send", "--send",
             "--autostart-on", "--autostart-off", "--install-driver", "--restore-driver", "--streams",
         };
         if (args.Length > 0 && Array.IndexOf(knownSwitches, args[0]) < 0)

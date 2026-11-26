@@ -54,6 +54,40 @@ internal static class RadioBindingTest
         Check(ref failures, parsed.Count == 2 && parsed[0] == "oem45.inf" && parsed[1] == "oem99.inf",
             "parses English and localized pnputil output");
 
+        // Q74: send URI roundtrip, JSON helper, and file validation
+        string sendUri = Activation.BuildSendUri(new[] { @"C:\tmp\a + b.jpg", @"D:\测试\c.mov" });
+        Check(ref failures, Activation.IsSendUri(sendUri), "IsSendUri detects send protocol");
+        string[] roundtrip = Activation.FilesFromSendUri(sendUri);
+        Check(ref failures, roundtrip.Length == 2 && roundtrip[0] == @"C:\tmp\a + b.jpg" && roundtrip[1] == @"D:\测试\c.mov",
+            "send URI roundtrips spaces, pluses, and Unicode paths");
+
+        string json = "{\"event\":\"progress\",\"done\":1024,\"total\":4096,\"name\":\"张三 的 iPhone\"}";
+        Check(ref failures, SendHelpers.JsonGetString(json, "event") == "progress", "JsonGetString event");
+        Check(ref failures, SendHelpers.JsonGetString(json, "name") == "张三 的 iPhone", "JsonGetString unicode");
+        Check(ref failures, SendHelpers.JsonGetLong(json, "done", -1) == 1024, "JsonGetLong done");
+
+        string tmpDir = System.IO.Path.Combine(System.IO.Path.GetTempPath(), "db-send-test-" + Guid.NewGuid().ToString("N"));
+        string d1 = System.IO.Path.Combine(tmpDir, "a");
+        string d2 = System.IO.Path.Combine(tmpDir, "b");
+        System.IO.Directory.CreateDirectory(d1);
+        System.IO.Directory.CreateDirectory(d2);
+        string f1 = System.IO.Path.Combine(d1, "photo.jpg");
+        string f2 = System.IO.Path.Combine(d2, "photo.jpg");
+        System.IO.File.WriteAllText(f1, "1");
+        System.IO.File.WriteAllText(f2, "2");
+        try
+        {
+            System.Collections.Generic.List<string> valid;
+            Check(ref failures, SendHelpers.ValidateSendFiles(new[] { f1 }, out valid) == null && valid.Count == 1,
+                "single existing file valid");
+            Check(ref failures, SendHelpers.ValidateSendFiles(new[] { f1, f2 }, out valid) != null,
+                "duplicate filename rejected");
+        }
+        finally
+        {
+            try { System.IO.Directory.Delete(tmpDir, true); } catch (Exception) { }
+        }
+
         Console.WriteLine(failures == 0 ? "PASS radio_binding" : "FAIL radio_binding (" + failures + " case(s))");
         return failures == 0 ? 0 : 1;
     }
