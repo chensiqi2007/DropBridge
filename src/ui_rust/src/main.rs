@@ -38,6 +38,7 @@ enum Tab {
 
 struct DropBridgeApp {
     root: PathBuf,
+    data_dir: PathBuf,
     tab: Tab,
     status: StatusSnapshot,
     last_poll: Instant,
@@ -48,9 +49,9 @@ struct DropBridgeApp {
 }
 
 impl DropBridgeApp {
-    fn new(cc: &eframe::CreationContext<'_>, root: PathBuf) -> Self {
+    fn new(cc: &eframe::CreationContext<'_>, root: PathBuf, data_dir: PathBuf) -> Self {
         install_chinese_font(&cc.egui_ctx);
-        let status = read_status(&root);
+        let status = read_status(&data_dir);
         let name_input = if status.device_name.is_empty() {
             "DropBridge".to_string()
         } else {
@@ -58,6 +59,7 @@ impl DropBridgeApp {
         };
         Self {
             root,
+            data_dir,
             tab: Tab::Home,
             status,
             last_poll: Instant::now() - Duration::from_secs(5),
@@ -69,20 +71,20 @@ impl DropBridgeApp {
     }
 
     fn supervisor_exe(&self) -> PathBuf {
-        let direct = self.root.join("DropBridge.exe");
-        if direct.exists() {
-            return direct;
+        for candidate in &[
+            self.root.join("DropBridge.exe"),
+            self.root.join("backend").join("DropBridge.exe"),
+            self.root
+                .join("build")
+                .join("supervisor")
+                .join("Release")
+                .join("DropBridge.exe"),
+        ] {
+            if candidate.exists() {
+                return candidate.clone();
+            }
         }
-        let dev = self
-            .root
-            .join("build")
-            .join("supervisor")
-            .join("Release")
-            .join("DropBridge.exe");
-        if dev.exists() {
-            return dev;
-        }
-        direct
+        self.root.join("DropBridge.exe")
     }
 
     fn send_ui_cmd(&mut self, query: &str) {
@@ -116,7 +118,7 @@ impl DropBridgeApp {
             self.toast_msg = format!("未找到 {:?}", exe);
             return;
         }
-        let log = self.root.join("data").join("logs").join("driver-install.txt");
+        let log = self.data_dir.join("logs").join("driver-install.txt");
         let _ = Command::new(&exe)
             .arg(arg)
             .arg("--root")
@@ -140,7 +142,7 @@ impl eframe::App for DropBridgeApp {
     fn update(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
         if self.last_poll.elapsed() >= Duration::from_millis(800) {
             self.last_poll = Instant::now();
-            self.status = read_status(&self.root);
+            self.status = read_status(&self.data_dir);
             if !self.name_dirty && !self.status.device_name.is_empty() {
                 self.name_input = self.status.device_name.clone();
             }
@@ -486,8 +488,39 @@ fn resolve_root() -> PathBuf {
     std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."))
 }
 
-fn read_status(root: &Path) -> StatusSnapshot {
-    let path = root.join("data").join("status.json");
+fn resolve_paths() -> (PathBuf, PathBuf) {
+    let mut root_arg: Option<PathBuf> = None;
+    let mut data_arg: Option<PathBuf> = None;
+    let args: Vec<String> = std::env::args().collect();
+    let mut i = 1;
+    while i < args.len() {
+        if args[i] == "--root" && i + 1 < args.len() {
+            root_arg = Some(PathBuf::from(&args[i + 1]));
+            i += 2;
+        } else if args[i] == "--data" && i + 1 < args.len() {
+            data_arg = Some(PathBuf::from(&args[i + 1]));
+            i += 2;
+        } else {
+            i += 1;
+        }
+    }
+
+    let root = root_arg.unwrap_or_else(resolve_root);
+    let data = data_arg.unwrap_or_else(|| {
+        if let Some(parent) = root.parent() {
+            if parent.file_name().and_then(|n| n.to_str()) == Some("app") {
+                if let Some(base) = parent.parent() {
+                    return base.join("data");
+                }
+            }
+        }
+        root.join("data")
+    });
+    (root, data)
+}
+
+fn read_status(data_dir: &Path) -> StatusSnapshot {
+    let path = data_dir.join("status.json");
     if let Ok(text) = fs::read_to_string(&path) {
         if let Ok(parsed) = serde_json::from_str::<StatusSnapshot>(&text) {
             return parsed;
@@ -538,7 +571,7 @@ fn install_chinese_font(ctx: &egui::Context) {
 }
 
 fn main() -> eframe::Result<()> {
-    let root = resolve_root();
+    let (root, data_dir) = resolve_paths();
     let options = eframe::NativeOptions {
         viewport: egui::ViewportBuilder::default()
             .with_inner_size([620.0, 500.0])
@@ -548,6 +581,6 @@ fn main() -> eframe::Result<()> {
     eframe::run_native(
         "DropBridge",
         options,
-        Box::new(move |cc| Ok(Box::new(DropBridgeApp::new(cc, root)))),
+        Box::new(move |cc| Ok(Box::new(DropBridgeApp::new(cc, root, data_dir)))),
     )
 }

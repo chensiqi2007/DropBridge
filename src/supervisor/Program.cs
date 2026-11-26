@@ -2941,6 +2941,8 @@ internal sealed class TrayApp : ApplicationContext
             Process.Start(new ProcessStartInfo(uiExe)
             {
                 WorkingDirectory = _supervisor.Root,
+                Arguments = "--root " + Supervisor.QuoteArgument(_supervisor.Root) +
+                            " --data " + Supervisor.QuoteArgument(_supervisor.DataDirectory),
                 UseShellExecute = true,
             });
             return true;
@@ -2956,7 +2958,7 @@ internal sealed class TrayApp : ApplicationContext
     {
         try
         {
-            string dataDir = Path.Combine(_supervisor.Root, "data");
+            string dataDir = _supervisor.DataDirectory;
             Directory.CreateDirectory(dataDir);
             RadioInspection info = RadioBinding.Inspect();
             string json =
