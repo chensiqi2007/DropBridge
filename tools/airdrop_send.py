@@ -50,6 +50,10 @@ if str(AIRDROP) not in sys.path:
 
 import mdns  # noqa: E402
 import sender  # noqa: E402
+try:
+    import apple_identity  # noqa: E402
+except ImportError:
+    apple_identity = None
 
 SERVICE_TYPE = '_airdrop._tcp.local'
 DEFAULT_PROXY_PORT = 8772
@@ -59,11 +63,13 @@ PEER_STALE_SECONDS = 30
 PROBE_RETRY_SECONDS = 3
 
 
-def anonymous_client_context() -> ssl.SSLContext:
-    """TLS client context with no client certificate for Everyone mode."""
+def anonymous_client_context(apple_dir: str | None = None) -> ssl.SSLContext:
+    """TLS client context: anonymous in Everyone mode, or Apple-signed when present."""
     context = ssl.SSLContext(ssl.PROTOCOL_TLS_CLIENT)
     context.check_hostname = False
     context.verify_mode = ssl.CERT_NONE
+    if apple_identity is not None and apple_identity.present(apple_dir):
+        apple_identity.load_into(context, apple_dir)
     return context
 
 
@@ -345,6 +351,8 @@ def parse_args(argv=None):
                         help='name the phone shows in its prompt')
     parser.add_argument('--keys', default=str(REPO / 'dist' / 'DropBridge' / 'data' / 'keys'),
                         help='unused for anonymous Everyone mode; kept for CLI compatibility')
+    parser.add_argument('--apple-identity', default=None,
+                        help='directory with Apple-signed AirDrop cert/key/validation_record.cms')
     parser.add_argument('--proxy-port', type=int, default=DEFAULT_PROXY_PORT)
     parser.add_argument('--mdns-port', type=int, default=DEFAULT_MDNS_PORT)
     parser.add_argument('--trace', action='store_true')
@@ -360,7 +368,19 @@ def main(argv=None):
                         format='%(asctime)s %(levelname)s %(message)s')
     ProxyConnection.proxy_port = settings.proxy_port
     sender.Connection = ProxyConnection      # every sender helper now tunnels
-    context = anonymous_client_context()
+    apple_dir = settings.apple_identity or os.environ.get('DROPBRIDGE_APPLE_IDENTITY')
+    if apple_identity is not None and apple_identity.present(apple_dir):
+        rec = apple_identity.record_bytes(apple_dir)
+        if rec:
+            orig_ask_body = sender.ask_body
+
+            def ask_body_with_record(sender_name, files, transfer_id):
+                body = orig_ask_body(sender_name, files, transfer_id)
+                body['SenderRecordData'] = rec
+                return body
+
+            sender.ask_body = ask_body_with_record
+    context = anonymous_client_context(apple_dir)
 
     if settings.json:
         return run_json_session(settings, context)

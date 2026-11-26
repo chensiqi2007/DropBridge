@@ -96,6 +96,16 @@ internal static class RadioBindingTest
         Check(ref failures, Activation.QueryParam("dropbridge://ui?cmd=rename&name=My%20PC", "name") == "My PC",
             "QueryParam decodes name");
 
+        // Contacts verification hashing
+        string h1 = TrayApp.NormalizeAndHashContact("13800138000");
+        string h2 = TrayApp.NormalizeAndHashContact("+86 138-0013-8000");
+        Check(ref failures, h1 != null && h1.Length == 64 && h1 == h2,
+            "mobile number normalization and SHA-256 match");
+        string h3 = TrayApp.NormalizeAndHashContact("  Test@Example.COM ");
+        string h4 = TrayApp.NormalizeAndHashContact("test@example.com");
+        Check(ref failures, h3 != null && h3.Length == 64 && h3 == h4,
+            "email normalization and SHA-256 match");
+
         Console.WriteLine(failures == 0 ? "PASS radio_binding" : "FAIL radio_binding (" + failures + " case(s))");
         return failures == 0 ? 0 : 1;
     }

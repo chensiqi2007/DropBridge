@@ -445,6 +445,7 @@ internal sealed class Supervisor
     // Per-user state (markers, logs) belongs here, not under Root: in the
     // single-exe layout Root is app\<build>, which changes on every upgrade.
     public string DataDirectory { get { return _data; } }
+    public string AppleIdentityDirectory { get { return Path.Combine(_data, "apple-identity"); } }
 
     private Child[] Snapshot()
     {
@@ -734,7 +735,12 @@ internal sealed class Supervisor
             " --mdns-address-file " + QuoteArgument(AddressFile()) +
             " --outdir " + QuoteArgument(ReceivedDirectory) +
             " --keys " + QuoteArgument(Path.Combine(_data, "keys")) + " --trace",
-            new Dictionary<string, string> { { "PYTHONUNBUFFERED", "1" } },
+            new Dictionary<string, string>
+            {
+                { "PYTHONUNBUFFERED", "1" },
+                { "DROPBRIDGE_APPLE_IDENTITY", AppleIdentityDirectory },
+                { "DROPBRIDGE_RECEIVE_MODE", Prefs.ReceiveMode },
+            },
             _root, "receiving as", _log);
     }
 
@@ -2297,6 +2303,7 @@ internal sealed class SendFilesDialog : Form
             StandardOutputEncoding = Encoding.UTF8,
             StandardErrorEncoding = Encoding.UTF8,
         };
+        psi.EnvironmentVariables["DROPBRIDGE_APPLE_IDENTITY"] = _supervisor.AppleIdentityDirectory;
         try
         {
             _proc = Process.Start(psi);
@@ -2949,6 +2956,42 @@ internal sealed class TrayApp : ApplicationContext
         }
     }
 
+    internal static string NormalizeAndHashContact(string input)
+    {
+        if (string.IsNullOrEmpty(input)) return null;
+        string s = input.Trim();
+        if (s.Length == 0) return null;
+        string norm;
+        if (s.IndexOf('@') >= 0)
+        {
+            norm = s.ToLowerInvariant();
+        }
+        else
+        {
+            var sb = new StringBuilder();
+            foreach (char ch in s)
+            {
+                if (char.IsDigit(ch) || ch == '+') sb.Append(ch);
+            }
+            string digits = sb.ToString();
+            if (digits.Length == 0) return null;
+            if (digits.StartsWith("00")) digits = "+" + digits.Substring(2);
+            else if (!digits.StartsWith("+"))
+            {
+                if (digits.Length == 11 && digits.StartsWith("1")) digits = "+86" + digits;
+                else digits = "+" + digits;
+            }
+            norm = digits;
+        }
+        using (var sha = System.Security.Cryptography.SHA256.Create())
+        {
+            byte[] bytes = sha.ComputeHash(Encoding.UTF8.GetBytes(norm));
+            var hex = new StringBuilder(64);
+            foreach (byte b in bytes) hex.Append(b.ToString("x2"));
+            return hex.ToString();
+        }
+    }
+
     private bool OpenDashboard()
     {
         try
@@ -2983,6 +3026,20 @@ internal sealed class TrayApp : ApplicationContext
             string dataDir = _supervisor.DataDirectory;
             Directory.CreateDirectory(dataDir);
             RadioInspection info = RadioBinding.Inspect();
+            string appleDir = _supervisor.AppleIdentityDirectory;
+            bool applePresent =
+                File.Exists(Path.Combine(appleDir, "certificate.der")) &&
+                File.Exists(Path.Combine(appleDir, "key.pk8.der")) &&
+                File.Exists(Path.Combine(appleDir, "validation_record.cms"));
+            int contactCount = 0;
+            string hashesPath = Path.Combine(appleDir, "contact_hashes.txt");
+            if (File.Exists(hashesPath))
+            {
+                foreach (string line in File.ReadAllLines(hashesPath, Encoding.UTF8))
+                {
+                    if (line.Trim().Length == 64) contactCount++;
+                }
+            }
             string json =
                 "{" +
                 "\"running\":" + (_supervisor.Running ? "true" : "false") + "," +
@@ -2994,6 +3051,9 @@ internal sealed class TrayApp : ApplicationContext
                 "\"stillCopy\":" + (_prefs.StillCopy ? "true" : "false") + "," +
                 "\"autostart\":" + (AutostartEnabled() ? "true" : "false") + "," +
                 "\"sendTo\":" + (AppIdentity.HasSendToShortcut() ? "true" : "false") + "," +
+                "\"receiveMode\":\"" + SendHelpers.JsonEscape(_prefs.ReceiveMode) + "\"," +
+                "\"appleIdentityPresent\":" + (applePresent ? "true" : "false") + "," +
+                "\"contactCount\":" + contactCount + "," +
                 "\"adapterName\":\"" + SendHelpers.JsonEscape(info.Target != null ? info.Target.Name : "") + "\"," +
                 "\"adapterPid\":\"" + SendHelpers.JsonEscape(info.Target != null ? info.Target.PidHex : "") + "\"," +
                 "\"deviceId\":\"" + SendHelpers.JsonEscape(info.DeviceId ?? "") + "\"," +
@@ -3085,6 +3145,77 @@ internal sealed class TrayApp : ApplicationContext
                     RestartReceiverOnly();
                 }
             }
+        }
+        else if (cmd == "set_receive_mode")
+        {
+            string mode = Activation.QueryParam(uri, "mode");
+            _prefs.SetReceiveMode(mode);
+            RestartReceiverOnly();
+        }
+        else if (cmd == "import_identity")
+        {
+            string src = Activation.QueryParam(uri, "dir");
+            if (!string.IsNullOrEmpty(src) && Directory.Exists(src))
+            {
+                string[] req = { "certificate.der", "key.pk8.der", "validation_record.cms" };
+                bool ok = true;
+                foreach (string f in req)
+                {
+                    if (!File.Exists(Path.Combine(src, f))) { ok = false; break; }
+                }
+                if (ok)
+                {
+                    string dst = _supervisor.AppleIdentityDirectory;
+                    Directory.CreateDirectory(dst);
+                    foreach (string f in new[] { "certificate.der", "key.pk8.der", "validation_record.cms", "intermediate.der", "contact_hashes.txt" })
+                    {
+                        string sp = Path.Combine(src, f);
+                        if (File.Exists(sp)) File.Copy(sp, Path.Combine(dst, f), true);
+                    }
+                    RestartReceiverOnly();
+                }
+            }
+        }
+        else if (cmd == "clear_identity")
+        {
+            try
+            {
+                if (Directory.Exists(_supervisor.AppleIdentityDirectory))
+                    Directory.Delete(_supervisor.AppleIdentityDirectory, true);
+            }
+            catch (Exception) { }
+            _prefs.SetReceiveMode("everyone");
+            RestartReceiverOnly();
+        }
+        else if (cmd == "add_contact")
+        {
+            string contact = Activation.QueryParam(uri, "contact");
+            string hash = NormalizeAndHashContact(contact);
+            if (!string.IsNullOrEmpty(hash))
+            {
+                string dst = _supervisor.AppleIdentityDirectory;
+                Directory.CreateDirectory(dst);
+                string file = Path.Combine(dst, "contact_hashes.txt");
+                var set = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+                if (File.Exists(file))
+                {
+                    foreach (string line in File.ReadAllLines(file, Encoding.UTF8))
+                    {
+                        string t = line.Trim().ToLowerInvariant();
+                        if (t.Length == 64) set.Add(t);
+                    }
+                }
+                if (set.Add(hash))
+                {
+                    File.WriteAllText(file, string.Join(Environment.NewLine, new List<string>(set).ToArray()) + Environment.NewLine, new UTF8Encoding(false));
+                }
+            }
+        }
+        else if (cmd == "clear_contacts")
+        {
+            string file = Path.Combine(_supervisor.AppleIdentityDirectory, "contact_hashes.txt");
+            try { if (File.Exists(file)) File.Delete(file); }
+            catch (Exception) { }
         }
         else if (cmd == "exit")
         {
@@ -4224,14 +4355,17 @@ internal sealed class Settings
     public bool StillCopy { get; private set; }
     // Q65: where received files land; empty means <data>\received.
     public string ReceivedFolder { get; private set; }
+    // Q75: "everyone" or "contacts".
+    public string ReceiveMode { get; private set; }
 
-    private Settings(string path, string deviceName, bool beacon, bool stillCopy, string receivedFolder)
+    private Settings(string path, string deviceName, bool beacon, bool stillCopy, string receivedFolder, string receiveMode)
     {
         _path = path;
         DeviceName = deviceName;
         Beacon = beacon;
         StillCopy = stillCopy;
         ReceivedFolder = receivedFolder;
+        ReceiveMode = receiveMode == "contacts" ? "contacts" : "everyone";
     }
 
     public static Settings Load(string dataDirectory)
@@ -4241,6 +4375,7 @@ internal sealed class Settings
         bool beacon = true;
         bool stillCopy = true;
         string receivedFolder = "";
+        string receiveMode = "everyone";
         try
         {
             if (File.Exists(path))
@@ -4273,6 +4408,10 @@ internal sealed class Settings
                         // An unusable path in a hand-edited file falls back to the default.
                         receivedFolder = CleanFolder(value) ?? "";
                     }
+                    else if (key.Equals("receiveMode", StringComparison.OrdinalIgnoreCase))
+                    {
+                        receiveMode = value.Equals("contacts", StringComparison.OrdinalIgnoreCase) ? "contacts" : "everyone";
+                    }
                 }
             }
             else if (File.Exists(Path.Combine(dataDirectory, "beacon-off")))
@@ -4284,7 +4423,7 @@ internal sealed class Settings
         catch (Exception)
         {
         }
-        return new Settings(path, deviceName, beacon, stillCopy, receivedFolder);
+        return new Settings(path, deviceName, beacon, stillCopy, receivedFolder, receiveMode);
     }
 
     public void SetDeviceName(string name)
@@ -4308,6 +4447,12 @@ internal sealed class Settings
     public void SetReceivedFolder(string folder)
     {
         ReceivedFolder = folder ?? "";
+        Save();
+    }
+
+    public void SetReceiveMode(string mode)
+    {
+        ReceiveMode = mode == "contacts" ? "contacts" : "everyone";
         Save();
     }
 
@@ -4349,6 +4494,7 @@ internal sealed class Settings
                 text.AppendLine("beacon=" + (Beacon ? "true" : "false"));
                 text.AppendLine("stillCopy=" + (StillCopy ? "true" : "false"));
                 text.AppendLine("receivedFolder=" + ReceivedFolder);
+                text.AppendLine("receiveMode=" + ReceiveMode);
                 File.WriteAllText(_path, text.ToString(), new UTF8Encoding(false));
             }
             catch (Exception)

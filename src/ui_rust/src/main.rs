@@ -19,6 +19,9 @@ struct StatusSnapshot {
     still_copy: bool,
     autostart: bool,
     send_to: bool,
+    receive_mode: String,
+    apple_identity_present: bool,
+    contact_count: u32,
     adapter_name: String,
     adapter_pid: String,
     device_id: String,
@@ -33,6 +36,7 @@ struct StatusSnapshot {
 enum Tab {
     Home,
     Driver,
+    Contacts,
     Settings,
 }
 
@@ -44,6 +48,7 @@ struct DropBridgeApp {
     last_poll: Instant,
     name_input: String,
     name_dirty: bool,
+    contact_input: String,
     driver_ack: bool,
     toast_msg: String,
 }
@@ -65,6 +70,7 @@ impl DropBridgeApp {
             last_poll: Instant::now() - Duration::from_secs(5),
             name_input,
             name_dirty: false,
+            contact_input: String::new(),
             driver_ack: false,
             toast_msg: String::new(),
         }
@@ -168,6 +174,7 @@ impl eframe::App for DropBridgeApp {
                 ui.add_space(12.0);
                 ui.selectable_value(&mut self.tab, Tab::Home, "收发使用");
                 ui.selectable_value(&mut self.tab, Tab::Driver, "安装与驱动");
+                ui.selectable_value(&mut self.tab, Tab::Contacts, "联系人验证");
                 ui.selectable_value(&mut self.tab, Tab::Settings, "设置与静默自启");
             });
             ui.add_space(6.0);
@@ -196,6 +203,7 @@ impl eframe::App for DropBridgeApp {
                 match self.tab {
                     Tab::Home => self.ui_home(ui),
                     Tab::Driver => self.ui_driver(ui),
+                    Tab::Contacts => self.ui_contacts(ui),
                     Tab::Settings => self.ui_settings(ui),
                 }
             });
@@ -370,6 +378,82 @@ impl DropBridgeApp {
                 }
             });
         }
+    }
+
+    fn ui_contacts(&mut self, ui: &mut egui::Ui) {
+        ui.group(|ui| {
+            ui.set_min_width(ui.available_width());
+            ui.heading("Apple 身份证书（仅限联系人模式）");
+            ui.add_space(4.0);
+            if self.status.apple_identity_present {
+                ui.colored_label(
+                    egui::Color32::from_rgb(22, 163, 74),
+                    "✓ 已导入 Apple 身份证书（接收和发送均会附带签名记录）",
+                );
+                if ui.button("清除已导入证书").clicked() {
+                    self.send_ui_cmd("cmd=clear_identity");
+                    self.toast_msg = "已清除 Apple 身份证书，恢复为所有人模式。".to_string();
+                }
+            } else {
+                ui.colored_label(
+                    egui::Color32::from_rgb(217, 119, 6),
+                    "未导入 Apple 身份证书（当前仅可使用「所有人」模式）",
+                );
+                ui.label("请从 Mac 导出 certificate.der、key.pk8.der、validation_record.cms（可选 intermediate.der / contact_hashes.txt）放入同一文件夹后导入。");
+                ui.add_space(4.0);
+                if ui.button("选择证书文件夹并导入…").clicked() {
+                    if let Some(dir) = rfd::FileDialog::new().pick_folder() {
+                        let encoded = url_encode(&dir.to_string_lossy());
+                        self.send_ui_cmd(&format!("cmd=import_identity&dir={}", encoded));
+                        self.toast_msg = "已提交导入证书请求。".to_string();
+                    }
+                }
+            }
+        });
+
+        ui.add_space(10.0);
+
+        ui.group(|ui| {
+            ui.set_min_width(ui.available_width());
+            ui.heading("接收验证模式");
+            ui.add_space(4.0);
+            let is_contacts = self.status.receive_mode == "contacts";
+            if ui.radio(!is_contacts, "所有人（任何人都可以发文件给本机）").clicked() {
+                self.send_ui_cmd("cmd=set_receive_mode&mode=everyone");
+            }
+            ui.add_enabled_ui(self.status.apple_identity_present, |ui| {
+                if ui
+                    .radio(is_contacts, "仅限联系人（仅接收信任联系人列表发来的文件）")
+                    .clicked()
+                {
+                    self.send_ui_cmd("cmd=set_receive_mode&mode=contacts");
+                }
+            });
+        });
+
+        ui.add_space(10.0);
+
+        ui.group(|ui| {
+            ui.set_min_width(ui.available_width());
+            ui.heading("信任联系人管理");
+            ui.add_space(4.0);
+            ui.label(format!("当前已保存信任联系人哈希：{} 条", self.status.contact_count));
+            ui.horizontal(|ui| {
+                ui.label("手机号 / Apple ID 邮箱：");
+                ui.text_edit_singleline(&mut self.contact_input);
+                if ui.button("添加").clicked() && !self.contact_input.trim().is_empty() {
+                    let encoded = url_encode(self.contact_input.trim());
+                    self.send_ui_cmd(&format!("cmd=add_contact&contact={}", encoded));
+                    self.contact_input.clear();
+                    self.toast_msg = "已添加信任联系人哈希。".to_string();
+                }
+            });
+            ui.add_space(4.0);
+            if ui.button("清空信任联系人").clicked() {
+                self.send_ui_cmd("cmd=clear_contacts");
+                self.toast_msg = "已清空信任联系人。".to_string();
+            }
+        });
     }
 
     fn ui_settings(&mut self, ui: &mut egui::Ui) {

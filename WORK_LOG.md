@@ -1,5 +1,15 @@
 # 工作记录 / 下一位 Agent 交接
 
+## 2026-11-26：Q76 双向 mDNS/发送窗口修复与联系人验证功能
+
+- **问题修复**：
+  - `src/awdl_netd/lwip_proxy.cpp`：分离 `g_announcer` 与 `g_querier`，修复 `airdrop_send.py` 与 `receiver.py` 共用 `15353` 时手机查询被转走的问题；出站套接字开启 `TCP_NODELAY`。
+  - `src/awdl_netd/lwipopts.h`：`TCP_SND_BUF` 从 32 KB 提至 48 KB，`TCP_SND_QUEUELEN=128`、`MEMP_NUM_TCP_SEG=256`。
+- **联系人验证（Contacts Only）**：
+  - 新增 `tools/apple_identity.py`，支持导入 Mac 导出的 `certificate.der` / `key.pk8.der` / `validation_record.cms` 与 `contact_hashes.txt`；接入 `upstream/winawdl/airdrop/receiver.py`（刷新 `patches/awdl-ipc-host.patch`）与 `tools/airdrop_send.py`。
+  - `src/supervisor/Program.cs` 与 `src/ui_rust/src/main.rs` 新增「联系人验证」页签（导入证书、切换所有人/仅限联系人模式、添加/清空信任联系人手机号与邮箱）。
+- **验证**：`Build-Supervisor.ps1 -Test`（含联系人哈希单测）、`Build-UiRust.ps1`、`test_airdrop_send.py` 通过；`awdl_netd.exe` 编译通过（仅因用户后台运行实机链路占用 49877/8771，CTest 1–2 通过、3–7 端口冲突）；重新打包完成。
+
 ## 2026-11-26：Q75 Rust 原生前端页面（DropBridgeUI.exe）与静默开机自启
 
 - **Rust 前端（`src/ui_rust/`）**：使用 `eframe` + `rfd` 编写 `DropBridgeUI.exe`（4.2 MB，无外部运行时依赖，自动加载微软雅黑），提供「收发使用」（状态、重启/重置、打开接收目录、选择或拖拽文件发送）、「安装与驱动」（网卡识别、高危断网提示、一键安装/恢复）、「设置与静默自启」（开机静默自启、右键发送到、改名、改目录、Beacon、实况图副本）。

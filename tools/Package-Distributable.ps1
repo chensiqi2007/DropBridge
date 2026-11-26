@@ -85,6 +85,7 @@ if (Test-Path $pth) {
 
 Copy-Item (Join-Path $airdrop '*.py') (Join-Path $stage 'backend\airdrop') -Force
 Copy-Item (Join-Path $root 'tools\airdrop_send.py') (Join-Path $stage 'backend\airdrop\airdrop_send.py') -Force
+Copy-Item (Join-Path $root 'tools\apple_identity.py') (Join-Path $stage 'backend\airdrop\apple_identity.py') -Force
 
 # Bluetooth beacon: keeps iPhone AWDL awake so the tray stays discoverable even
 # when the phone's share sheet is closed (MIT, upstream winawdl).

@@ -72,6 +72,7 @@ if (Test-Path $pth) {
 
 Copy-Item (Join-Path $airdrop '*.py') (Join-Path $stage 'backend\airdrop') -Force
 Copy-Item (Join-Path $root 'tools\airdrop_send.py') (Join-Path $stage 'backend\airdrop\airdrop_send.py') -Force
+Copy-Item (Join-Path $root 'tools\apple_identity.py') (Join-Path $stage 'backend\airdrop\apple_identity.py') -Force
 
 # Same extras as Package-Distributable.ps1. The self-extractor passes
 # --root app\<build>, so the tray looks for <root>\backend\beacon.ps1 and
