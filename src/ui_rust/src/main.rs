@@ -20,6 +20,12 @@ struct StatusSnapshot {
     autostart: bool,
     send_to: bool,
     receive_mode: String,
+    #[serde(default)]
+    media_format: String,
+    #[serde(default)]
+    ble_hashes: String,
+    #[serde(default)]
+    my_identifiers: String,
     apple_identity_present: bool,
     contact_count: u32,
     adapter_name: String,
@@ -49,6 +55,8 @@ struct DropBridgeApp {
     name_input: String,
     name_dirty: bool,
     contact_input: String,
+    my_id_input: String,
+    my_id_dirty: bool,
     driver_ack: bool,
     toast_msg: String,
 }
@@ -62,6 +70,7 @@ impl DropBridgeApp {
         } else {
             status.device_name.clone()
         };
+        let my_id_input = status.my_identifiers.clone();
         Self {
             root,
             data_dir,
@@ -71,6 +80,8 @@ impl DropBridgeApp {
             name_input,
             name_dirty: false,
             contact_input: String::new(),
+            my_id_input,
+            my_id_dirty: false,
             driver_ack: false,
             toast_msg: String::new(),
         }
@@ -151,6 +162,9 @@ impl eframe::App for DropBridgeApp {
             self.status = read_status(&self.data_dir);
             if !self.name_dirty && !self.status.device_name.is_empty() {
                 self.name_input = self.status.device_name.clone();
+            }
+            if !self.my_id_dirty && !self.status.my_identifiers.is_empty() {
+                self.my_id_input = self.status.my_identifiers.clone();
             }
         }
         ctx.request_repaint_after(Duration::from_millis(900));
@@ -250,6 +264,10 @@ impl DropBridgeApp {
                         self.ensure_backend_silent();
                     }
                 } else {
+                    if (ui.button("唤醒附近 iPhone（BLE 脉冲）")).clicked() {
+                        self.send_ui_cmd("cmd=pulse_beacon");
+                        self.toast_msg = "已发送 BLE 唤醒脉冲，请重新打开 iPhone 隔空投送面板。".to_string();
+                    }
                     if ui.button("重新启动后端").clicked() {
                         self.send_ui_cmd("cmd=restart");
                     }
@@ -415,11 +433,41 @@ impl DropBridgeApp {
 
         ui.group(|ui| {
             ui.set_min_width(ui.available_width());
-            ui.heading("接收验证模式");
+            ui.heading("我的 Apple ID 标识（BLE 唤醒哈希）");
             ui.add_space(4.0);
+            ui.label("填写您的 Apple ID 邮箱或手机号（11 位大陆手机号自动补全 +86，多个用逗号分隔）。保存后会写入蓝牙广播，帮助「仅限联系人」模式下的 iPhone 发现本机。");
+            ui.horizontal(|ui| {
+                if ui.text_edit_singleline(&mut self.my_id_input).changed() {
+                    self.my_id_dirty = true;
+                }
+                if ui.button("保存并刷新广播").clicked() {
+                    let encoded = url_encode(self.my_id_input.trim());
+                    self.my_id_dirty = false;
+                    self.send_ui_cmd(&format!("cmd=set_my_ids&ids={}", encoded));
+                    self.toast_msg = "已更新本机 BLE 唤醒哈希并重启蓝牙广播。".to_string();
+                }
+            });
+            if !self.status.ble_hashes.is_empty() {
+                ui.label(format!("当前 BLE 广播哈希前缀：{}", self.status.ble_hashes));
+            }
+        });
+
+        ui.add_space(10.0);
+
+        ui.group(|ui| {
+            ui.set_min_width(ui.available_width());
+            ui.heading("接收策略与媒体格式");
+            ui.add_space(4.0);
+            let is_auto = self.status.receive_mode == "auto"
+                || self.status.receive_mode == "everyone"
+                || self.status.receive_mode.is_empty();
+            let is_ask = self.status.receive_mode == "ask";
             let is_contacts = self.status.receive_mode == "contacts";
-            if ui.radio(!is_contacts, "所有人（任何人都可以发文件给本机）").clicked() {
-                self.send_ui_cmd("cmd=set_receive_mode&mode=everyone");
+            if ui.radio(is_auto, "所有人（自动接收并保存）").clicked() {
+                self.send_ui_cmd("cmd=set_receive_mode&mode=auto");
+            }
+            if ui.radio(is_ask, "所有人（接收前弹窗询问确认）").clicked() {
+                self.send_ui_cmd("cmd=set_receive_mode&mode=ask");
             }
             ui.add_enabled_ui(self.status.apple_identity_present, |ui| {
                 if ui
@@ -427,6 +475,20 @@ impl DropBridgeApp {
                     .clicked()
                 {
                     self.send_ui_cmd("cmd=set_receive_mode&mode=contacts");
+                }
+            });
+
+            ui.add_space(6.0);
+            ui.separator();
+            ui.add_space(4.0);
+            let is_original = self.status.media_format == "original";
+            ui.label("照片与视频格式偏好：");
+            ui.horizontal(|ui| {
+                if ui.radio(!is_original, "兼容格式（推荐：自动转为 JPEG / H.264）").clicked() {
+                    self.send_ui_cmd("cmd=set_media_format&format=compatible");
+                }
+                if ui.radio(is_original, "原始格式（保留 iPhone 原片 HEIC / HEVC）").clicked() {
+                    self.send_ui_cmd("cmd=set_media_format&format=original");
                 }
             });
         });

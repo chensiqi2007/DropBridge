@@ -1,5 +1,20 @@
 # 工作记录 / 下一位 Agent 交接
 
+## 2026-11-26：Q77 参考 NekoDrop 优化数据面调度、BLE 唤醒、5G 信道探测与接收策略
+
+- **数据面防饿死与高吞吐（`patches/awdl-ipc-host.patch` / `upstream/winawdl`）**：
+  - `awdl/win/ev_win.c`：修复 `WaitForMultipleObjects` 只回调首个就绪句柄导致无线 RX 饿死 `host_fd` 管道的问题，改为唤醒后非阻塞轮询其余所有就绪句柄。
+  - `awdl/win/io_win.c`：`pcap_dispatch` 改为单次最多批量处理 32 帧，降低内核等待与定时器开销。
+  - `awdl/win/radio_client.h/.c`：`RADIO_CLIENT_MAX_FRAME` 从 4096 提至 12800 容纳大号 RX A-MSDU，并增加 64 KB 管道预读缓冲区。
+  - `tools/Build-Awdl.ps1` / `tools/Build-Radio.ps1`：自动探测本机 CMake 4.1.2 与 MinGW `-lwinpthread`，修复无参一键构建。
+- **BLE 唤醒与 5 GHz 信道自适应**：
+  - `src/beacon/airdrop-beacon.ps1`：支持 `DROPBRIDGE_BLE_HASHES`（最多 4 个 2 字节 SHA-256 前缀，否则生成非零随机字节）、`DROPBRIDGE_BEACON_PULSE`（2.5s 停播重启制造唤醒边沿）与 3 次 `Aborted` 自动重试。
+  - `src/radio_usb/main.cpp`：在 `on_rx` 解析对端 AWDL Action 帧 `TLV 18`，在 `radio.log` 记录 `peer_5g=44/149`。
+  - `upstream/winawdl/airdrop/receiver.py`：支持 `8771..8779` 端口回退并同步更新 mDNS SRV；传输结束后自动触发一次 BLE 脉冲。
+- **联系人验证、弹窗确认与媒体格式**：
+  - `tools/apple_identity.py`、`src/supervisor/Program.cs`、`src/ui_rust/src/main.rs`：支持填写本机 Apple ID 邮箱/手机号（`+86` 规范化生成 BLE 哈希前缀）、三档接收策略（自动接收 / 弹窗询问确认 / 仅限联系人）与媒体格式偏好（兼容 JPEG/H.264 / 原始 HEIC/HEVC），首页新增「唤醒附近 iPhone（BLE 脉冲）」按钮。
+- **验证**：`Build-Radio.ps1`（`peer_telemetry`、`channel_completion` 2/2 通过）、`Build-Awdl.ps1`、`Build-Supervisor.ps1 -Test`、`Build-UiRust.ps1`、`test_airdrop_send.py`、`apple_identity` 自检、`airdrop-beacon.ps1 -DryRun` 全部通过；便携版/无头版/单文件 `dist\DropBridge.exe`（23.3 MB）重打包完成。
+
 ## 2026-11-26：Q76 双向 mDNS/发送窗口修复与联系人验证功能
 
 - **问题修复**：

@@ -261,10 +261,43 @@ internal sealed class Child
         Interlocked.Exchange(ref _lastOutputTicks, DateTime.UtcNow.Ticks);
         _log.Write(Name, line);
         if (_lineSeen != null) _lineSeen(line);
+        if (Name == "receiver" && line.StartsWith("ASK_CONFIRM|", StringComparison.Ordinal))
+        {
+            HandleAskConfirmLine(line);
+        }
         if (_needle != null && line.IndexOf(_needle, StringComparison.Ordinal) >= 0)
         {
             Ready.Set();
         }
+    }
+
+    private void HandleAskConfirmLine(string line)
+    {
+        string[] parts = line.Split(new[] { '|' }, 5);
+        if (parts.Length < 5) return;
+        string reqId = parts[1];
+        string sender = parts[2];
+        string model = parts[3];
+        string summary = parts[4];
+        string askDir = Path.GetFullPath(Path.Combine(_log.DirectoryPath, "..", "..", "ask"));
+        var t = new Thread(delegate()
+        {
+            string title = "DropBridge 隔空投送请求";
+            string msg = "来自「" + sender + (string.IsNullOrEmpty(model) ? "" : " (" + model + ")") +
+                         "」的投送：\n" + summary + "\n\n是否接收？";
+            DialogResult res = MessageBox.Show(msg, title, MessageBoxButtons.YesNo,
+                MessageBoxIcon.Question, MessageBoxDefaultButton.Button1, MessageBoxOptions.DefaultDesktopOnly);
+            try
+            {
+                Directory.CreateDirectory(askDir);
+                File.WriteAllText(Path.Combine(askDir, reqId + ".ans"),
+                    res == DialogResult.Yes ? "accept" : "decline", Encoding.ASCII);
+            }
+            catch (Exception) { }
+        });
+        t.SetApartmentState(ApartmentState.STA);
+        t.IsBackground = true;
+        t.Start();
     }
 
     /// <summary>
@@ -740,6 +773,9 @@ internal sealed class Supervisor
                 { "PYTHONUNBUFFERED", "1" },
                 { "DROPBRIDGE_APPLE_IDENTITY", AppleIdentityDirectory },
                 { "DROPBRIDGE_RECEIVE_MODE", Prefs.ReceiveMode },
+                { "DROPBRIDGE_MEDIA_FORMAT", Prefs.MediaFormat },
+                { "DROPBRIDGE_BEACON_PULSE", Path.Combine(_data, "beacon.pulse") },
+                { "DROPBRIDGE_ASK_DIR", Path.Combine(_data, "ask") },
             },
             _root, "receiving as", _log);
     }
@@ -2956,6 +2992,16 @@ internal sealed class TrayApp : ApplicationContext
         }
     }
 
+    private static string ReadSmallText(string path)
+    {
+        try
+        {
+            if (File.Exists(path)) return File.ReadAllText(path, Encoding.UTF8).Trim();
+        }
+        catch (Exception) { }
+        return "";
+    }
+
     internal static string NormalizeAndHashContact(string input)
     {
         if (string.IsNullOrEmpty(input)) return null;
@@ -3052,6 +3098,9 @@ internal sealed class TrayApp : ApplicationContext
                 "\"autostart\":" + (AutostartEnabled() ? "true" : "false") + "," +
                 "\"sendTo\":" + (AppIdentity.HasSendToShortcut() ? "true" : "false") + "," +
                 "\"receiveMode\":\"" + SendHelpers.JsonEscape(_prefs.ReceiveMode) + "\"," +
+                "\"mediaFormat\":\"" + SendHelpers.JsonEscape(_prefs.MediaFormat) + "\"," +
+                "\"bleHashes\":\"" + SendHelpers.JsonEscape(ReadSmallText(Path.Combine(_supervisor.AppleIdentityDirectory, "ble_hashes.txt"))) + "\"," +
+                "\"myIdentifiers\":\"" + SendHelpers.JsonEscape(ReadSmallText(Path.Combine(_supervisor.AppleIdentityDirectory, "my_identifiers.txt")).Replace("\r", "").Replace("\n", ", ")) + "\"," +
                 "\"appleIdentityPresent\":" + (applePresent ? "true" : "false") + "," +
                 "\"contactCount\":" + contactCount + "," +
                 "\"adapterName\":\"" + SendHelpers.JsonEscape(info.Target != null ? info.Target.Name : "") + "\"," +
@@ -3151,6 +3200,45 @@ internal sealed class TrayApp : ApplicationContext
             string mode = Activation.QueryParam(uri, "mode");
             _prefs.SetReceiveMode(mode);
             RestartReceiverOnly();
+        }
+        else if (cmd == "set_media_format")
+        {
+            string fmt = Activation.QueryParam(uri, "format");
+            _prefs.SetMediaFormat(fmt);
+            RestartReceiverOnly();
+        }
+        else if (cmd == "pulse_beacon")
+        {
+            try
+            {
+                File.WriteAllText(Path.Combine(_supervisor.DataDirectory, "beacon.pulse"), "1\n", Encoding.ASCII);
+            }
+            catch (Exception) { }
+        }
+        else if (cmd == "set_my_ids")
+        {
+            string ids = Activation.QueryParam(uri, "ids") ?? "";
+            string[] tokens = ids.Split(new[] { ',', ';', '\n', '\r' }, StringSplitOptions.RemoveEmptyEntries);
+            var cleanIds = new List<string>();
+            var prefixes = new List<string>();
+            foreach (string raw in tokens)
+            {
+                string t = raw.Trim();
+                if (t.Length == 0) continue;
+                cleanIds.Add(t);
+                string h = NormalizeAndHashContact(t);
+                if (!string.IsNullOrEmpty(h))
+                {
+                    string p = h.Substring(0, 4);
+                    if (!prefixes.Contains(p) && prefixes.Count < 4) prefixes.Add(p);
+                }
+            }
+            string dst = _supervisor.AppleIdentityDirectory;
+            Directory.CreateDirectory(dst);
+            File.WriteAllText(Path.Combine(dst, "my_identifiers.txt"), string.Join("\n", cleanIds.ToArray()), Encoding.UTF8);
+            File.WriteAllText(Path.Combine(dst, "ble_hashes.txt"), string.Join(",", prefixes.ToArray()), Encoding.ASCII);
+            StopBeacon();
+            if (_beaconWanted) StartBeacon();
         }
         else if (cmd == "import_identity")
         {
@@ -3433,6 +3521,11 @@ internal sealed class TrayApp : ApplicationContext
                 RedirectStandardError = true,
                 CreateNoWindow = true,
             };
+            start.EnvironmentVariables["DROPBRIDGE_BEACON_PULSE"] = Path.Combine(_supervisor.DataDirectory, "beacon.pulse");
+            start.EnvironmentVariables["DROPBRIDGE_IDENTITY_DIR"] = _supervisor.AppleIdentityDirectory;
+            string bleHashes = ReadSmallText(Path.Combine(_supervisor.AppleIdentityDirectory, "ble_hashes.txt"));
+            if (!string.IsNullOrEmpty(bleHashes))
+                start.EnvironmentVariables["DROPBRIDGE_BLE_HASHES"] = bleHashes;
             _beacon = Process.Start(start);
             _beaconStartedUtc = DateTime.UtcNow;
             ChildJob.Add(_beacon);
@@ -4355,17 +4448,28 @@ internal sealed class Settings
     public bool StillCopy { get; private set; }
     // Q65: where received files land; empty means <data>\received.
     public string ReceivedFolder { get; private set; }
-    // Q75: "everyone" or "contacts".
+    // Q75/Q77: "auto" (everyone), "ask" (prompt), or "contacts".
     public string ReceiveMode { get; private set; }
+    // Q77: "compatible" (JPEG/H.264) or "original" (HEIC/HEVC).
+    public string MediaFormat { get; private set; }
 
-    private Settings(string path, string deviceName, bool beacon, bool stillCopy, string receivedFolder, string receiveMode)
+    private Settings(string path, string deviceName, bool beacon, bool stillCopy, string receivedFolder, string receiveMode, string mediaFormat)
     {
         _path = path;
         DeviceName = deviceName;
         Beacon = beacon;
         StillCopy = stillCopy;
         ReceivedFolder = receivedFolder;
-        ReceiveMode = receiveMode == "contacts" ? "contacts" : "everyone";
+        ReceiveMode = NormalizeReceiveMode(receiveMode);
+        MediaFormat = mediaFormat == "original" ? "original" : "compatible";
+    }
+
+    private static string NormalizeReceiveMode(string mode)
+    {
+        if (string.IsNullOrEmpty(mode)) return "auto";
+        string m = mode.Trim().ToLowerInvariant();
+        if (m == "contacts" || m == "ask") return m;
+        return "auto";
     }
 
     public static Settings Load(string dataDirectory)
@@ -4375,7 +4479,8 @@ internal sealed class Settings
         bool beacon = true;
         bool stillCopy = true;
         string receivedFolder = "";
-        string receiveMode = "everyone";
+        string receiveMode = "auto";
+        string mediaFormat = "compatible";
         try
         {
             if (File.Exists(path))
@@ -4410,7 +4515,11 @@ internal sealed class Settings
                     }
                     else if (key.Equals("receiveMode", StringComparison.OrdinalIgnoreCase))
                     {
-                        receiveMode = value.Equals("contacts", StringComparison.OrdinalIgnoreCase) ? "contacts" : "everyone";
+                        receiveMode = NormalizeReceiveMode(value);
+                    }
+                    else if (key.Equals("mediaFormat", StringComparison.OrdinalIgnoreCase))
+                    {
+                        mediaFormat = value.Equals("original", StringComparison.OrdinalIgnoreCase) ? "original" : "compatible";
                     }
                 }
             }
@@ -4423,7 +4532,7 @@ internal sealed class Settings
         catch (Exception)
         {
         }
-        return new Settings(path, deviceName, beacon, stillCopy, receivedFolder, receiveMode);
+        return new Settings(path, deviceName, beacon, stillCopy, receivedFolder, receiveMode, mediaFormat);
     }
 
     public void SetDeviceName(string name)
@@ -4452,7 +4561,13 @@ internal sealed class Settings
 
     public void SetReceiveMode(string mode)
     {
-        ReceiveMode = mode == "contacts" ? "contacts" : "everyone";
+        ReceiveMode = NormalizeReceiveMode(mode);
+        Save();
+    }
+
+    public void SetMediaFormat(string format)
+    {
+        MediaFormat = format == "original" ? "original" : "compatible";
         Save();
     }
 
@@ -4495,6 +4610,7 @@ internal sealed class Settings
                 text.AppendLine("stillCopy=" + (StillCopy ? "true" : "false"));
                 text.AppendLine("receivedFolder=" + ReceivedFolder);
                 text.AppendLine("receiveMode=" + ReceiveMode);
+                text.AppendLine("mediaFormat=" + MediaFormat);
                 File.WriteAllText(_path, text.ToString(), new UTF8Encoding(false));
             }
             catch (Exception)

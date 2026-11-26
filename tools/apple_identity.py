@@ -21,7 +21,7 @@ import shutil
 from pathlib import Path
 
 REQUIRED_FILES = ('certificate.der', 'key.pk8.der', 'validation_record.cms')
-OPTIONAL_FILES = ('intermediate.der', 'contact_hashes.txt')
+OPTIONAL_FILES = ('intermediate.der', 'contact_hashes.txt', 'my_identifiers.txt', 'ble_hashes.txt')
 _HEX64 = re.compile(rb'<string>\s*([0-9A-Fa-f]{64})\s*</string>')
 _DATA = re.compile(rb'<data>\s*([A-Za-z0-9+/=\s]+?)\s*</data>')
 
@@ -31,8 +31,28 @@ def identity_dir(explicit: str | None = None) -> str:
 
 
 def receive_mode() -> str:
-    mode = (os.environ.get('DROPBRIDGE_RECEIVE_MODE') or 'everyone').strip().lower()
-    return 'contacts' if mode == 'contacts' else 'everyone'
+    mode = (os.environ.get('DROPBRIDGE_RECEIVE_MODE') or 'auto').strip().lower()
+    if mode in ('contacts', 'ask'):
+        return mode
+    return 'auto'
+
+
+def media_format() -> str:
+    fmt = (os.environ.get('DROPBRIDGE_MEDIA_FORMAT') or 'compatible').strip().lower()
+    return 'original' if fmt == 'original' else 'compatible'
+
+
+def media_capabilities_dict() -> dict:
+    if media_format() == 'original':
+        return {
+            'Version': 1,
+            'AssetBundle': {
+                'Version': 1,
+                'Video': ['hevc', 'h264'],
+                'Image': ['heic', 'jpeg'],
+            },
+        }
+    return {'Version': 1}
 
 
 def present(directory: str | None = None) -> bool:
@@ -118,6 +138,44 @@ def normalize_contact(identifier: str) -> str:
 def hash_contact(identifier: str) -> str:
     norm = normalize_contact(identifier)
     return hashlib.sha256(norm.encode('utf-8')).hexdigest()
+
+
+def compute_ble_hashes(identifiers: list[str]) -> list[str]:
+    prefixes: list[str] = []
+    for item in identifiers:
+        item = item.strip()
+        if not item:
+            continue
+        h = hash_contact(item)
+        prefix = h[:4]
+        if prefix not in prefixes:
+            prefixes.append(prefix)
+        if len(prefixes) >= 4:
+            break
+    return prefixes
+
+
+def save_my_identifiers(identifiers: list[str], directory: str | None = None) -> list[str]:
+    d = identity_dir(directory)
+    if not d:
+        return []
+    p = Path(d)
+    p.mkdir(parents=True, exist_ok=True)
+    cleaned = [x.strip() for x in identifiers if x.strip()]
+    (p / 'my_identifiers.txt').write_text('\n'.join(cleaned) + ('\n' if cleaned else ''), encoding='utf-8')
+    prefixes = compute_ble_hashes(cleaned)
+    (p / 'ble_hashes.txt').write_text(','.join(prefixes), encoding='ascii')
+    return prefixes
+
+
+def load_ble_hashes(directory: str | None = None) -> str:
+    d = identity_dir(directory)
+    if not d:
+        return ''
+    p = Path(d) / 'ble_hashes.txt'
+    if p.is_file():
+        return p.read_text(encoding='ascii', errors='ignore').strip()
+    return ''
 
 
 def extract_record_hashes(blob: bytes) -> set[str]:

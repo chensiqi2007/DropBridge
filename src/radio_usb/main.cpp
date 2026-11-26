@@ -174,10 +174,46 @@ std::atomic<uint64_t> g_rx_small{0};
 std::atomic<uint64_t> g_rx_filtered{0};
 std::atomic<uint64_t> g_rx_queued{0};
 std::atomic<uint64_t> g_rx_dropped{0};
+std::atomic<uint8_t> g_peer_5g_channel{0};
 // Accepted data frames only: what the peer's rate control is doing is the
 // difference between a 900 KB/s and a 250 KB/s transfer with identical loss.
 PeerTelemetry g_peer;
 std::chrono::steady_clock::time_point g_start;
+
+// Inspect Apple AWDL Action frames (Category 127, OUI 00:17:F2, Type 0x08) for
+// TLV 18 (Channel Sequence) to detect whether the peer iPhone prefers ch 44 or 149.
+void observe_peer_awdl_channel(std::span<const uint8_t> frame) {
+    // 24-byte 802.11 MAC header + 16-byte vendor/AWDL header
+    if (frame.size() < 24 + 16) return;
+    if ((frame[0] & 0xFC) != 0xD0) return;  // Management Action
+    if (frame[24] != 0x7F || frame[25] != 0x00 || frame[26] != 0x17 ||
+        frame[27] != 0xF2 || frame[28] != 0x08) {
+        return;
+    }
+    size_t pos = 24 + 16;
+    while (pos + 3 <= frame.size()) {
+        uint8_t tlv_type = frame[pos];
+        uint16_t tlv_len = static_cast<uint16_t>(frame[pos + 1]) |
+                           (static_cast<uint16_t>(frame[pos + 2]) << 8);
+        pos += 3;
+        if (pos + tlv_len > frame.size()) break;
+        if (tlv_type == 18 && tlv_len >= 8) {
+            for (size_t i = 6; i + 1 < tlv_len; i += 2) {
+                uint8_t a = frame[pos + i];
+                uint8_t b = frame[pos + i + 1];
+                if (a == 44 || b == 44) {
+                    g_peer_5g_channel.store(44, std::memory_order_relaxed);
+                    return;
+                }
+                if (a == 149 || b == 149) {
+                    g_peer_5g_channel.store(149, std::memory_order_relaxed);
+                    return;
+                }
+            }
+        }
+        pos += tlv_len;
+    }
+}
 
 long long elapsed_ms() {
     return std::chrono::duration_cast<std::chrono::milliseconds>(
@@ -209,6 +245,7 @@ void on_rx(const Packet &packet, OutQueue &queue, FilterState &state,
         }
         if (state.has_own) g_peer.observe(packet, state.own);
     }
+    observe_peer_awdl_channel(frame);
 
     std::vector<uint8_t> message(sizeof(radio_link_header) + kRadiotapBytes +
                                  frame.size());
@@ -624,10 +661,11 @@ int run(uint8_t channel, int width_mhz, uint16_t port, bool skip_reset) {
                     g_rx_filtered.load(), g_rx_queued.load(),
                     g_rx_dropped.load(), tx_sent.load(), tx_failed.load());
                 logger->warn(
-                    "radio: peer frames={} fps={:.1f} rssi={} rssi_n={} bytes={} rate={} bw={} sgi={} thermal={}/{} thermal_valid={}",
+                    "radio: peer frames={} fps={:.1f} rssi={} rssi_n={} bytes={} rate={} bw={} sgi={} thermal={}/{} thermal_valid={} peer_5g={}",
                     sample.frames, sample.frames / seconds, rssi, sample.signal_samples,
                     sample.bytes, sample.rate, sample.bw, sample.sgi,
-                    static_cast<unsigned>(thermal.raw), thermal.delta, thermal.valid);
+                    static_cast<unsigned>(thermal.raw), thermal.delta, thermal.valid,
+                    g_peer_5g_channel.load(std::memory_order_relaxed));
             } else {
                 logger->info(
                     "radio: stats cb={} crc={} small={} filtered={} queued={} drop={} tx={} failed={}",
@@ -635,10 +673,11 @@ int run(uint8_t channel, int width_mhz, uint16_t port, bool skip_reset) {
                     g_rx_filtered.load(), g_rx_queued.load(),
                     g_rx_dropped.load(), tx_sent.load(), tx_failed.load());
                 logger->info(
-                    "radio: peer frames={} fps={:.1f} rssi={} rssi_n={} bytes={} rate={} bw={} sgi={} thermal={}/{} thermal_valid={}",
+                    "radio: peer frames={} fps={:.1f} rssi={} rssi_n={} bytes={} rate={} bw={} sgi={} thermal={}/{} thermal_valid={} peer_5g={}",
                     sample.frames, sample.frames / seconds, rssi, sample.signal_samples,
                     sample.bytes, sample.rate, sample.bw, sample.sgi,
-                    static_cast<unsigned>(thermal.raw), thermal.delta, thermal.valid);
+                    static_cast<unsigned>(thermal.raw), thermal.delta, thermal.valid,
+                    g_peer_5g_channel.load(std::memory_order_relaxed));
             }
         }
     });
