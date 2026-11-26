@@ -286,11 +286,32 @@ int run(uint8_t channel, int width_mhz, uint16_t port, bool skip_reset) {
     }
 
     const uint16_t vid = env_hex16("AIRBRIDGE_VID", 0x0bda);
-    const uint16_t pid = env_hex16("AIRBRIDGE_PID", 0xc820);
-    libusb_device_handle *handle = libusb_open_device_with_vid_pid(ctx, vid, pid);
+    const char *pid_env = std::getenv("AIRBRIDGE_PID");
+    std::vector<uint16_t> pids;
+    if (pid_env && *pid_env) {
+        pids.push_back(static_cast<uint16_t>(std::strtoul(pid_env, nullptr, 0)));
+    } else {
+        pids = {0xc820, 0xc811};
+    }
+
+    libusb_device_handle *handle = nullptr;
+    uint16_t opened_pid = 0;
+    for (uint16_t candidate : pids) {
+        handle = libusb_open_device_with_vid_pid(ctx, vid, candidate);
+        if (handle) {
+            opened_pid = candidate;
+            break;
+        }
+    }
     if (!handle) {
-        logger->error("radio: no device {:04x}:{:04x} (is MI_02 on WinUSB?)",
-                      vid, pid);
+        std::string list;
+        for (size_t i = 0; i < pids.size(); ++i) {
+            char buf[8];
+            std::snprintf(buf, sizeof(buf), "%s%04x", i ? "/" : "", pids[i]);
+            list += buf;
+        }
+        logger->error("radio: no device {:04x}:{} (is the Wi-Fi interface on WinUSB?)",
+                      vid, list);
         libusb_exit(ctx);
         WSACleanup();
         return 2;
@@ -305,6 +326,7 @@ int run(uint8_t channel, int width_mhz, uint16_t port, bool skip_reset) {
     }
 
     int iface = devourer::find_wifi_interface(handle);
+    logger->info("radio: opened {:04x}:{:04x}, wifi interface={}", vid, opened_pid, iface);
     std::shared_ptr<devourer::UsbDeviceLock> usb_lock;
     int rc = 0;
     if (skip_reset) {
