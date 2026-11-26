@@ -1089,6 +1089,152 @@ internal sealed class RadioTarget
     }
 }
 
+internal sealed class RadioInspection
+{
+    public RadioTarget Target;
+    public string DeviceId;
+    public string FriendlyName;
+    public string Service;
+    public string ActiveAdapterName;
+    public bool TargetIsUp;
+    public bool HasOtherUpNetwork;
+
+    public bool WouldLoseAllNetwork
+    {
+        get { return RadioBinding.AssessNetworkRisk(TargetIsUp, HasOtherUpNetwork); }
+    }
+}
+
+internal sealed class DriverSetupDialog : Form
+{
+    private readonly CheckBox _ackBox;
+    private readonly Button _installButton;
+
+    public DriverSetupDialog(RadioInspection info)
+    {
+        Text = "DropBridge — 驱动安装前确认";
+        FormBorderStyle = FormBorderStyle.FixedDialog;
+        MaximizeBox = false;
+        MinimizeBox = false;
+        StartPosition = FormStartPosition.CenterScreen;
+        AutoScaleMode = AutoScaleMode.Font;
+        ClientSize = new Size(520, 390);
+
+        var title = new Label
+        {
+            Text = "即将把以下专用网卡的 Wi-Fi 接口绑定到 WinUSB 驱动：",
+            Font = new Font(Font.FontFamily, 9.5f, FontStyle.Bold),
+            Location = new Point(18, 16),
+            Size = new Size(484, 24),
+        };
+
+        string svcDisplay = string.IsNullOrEmpty(info.Service) ? "无" : info.Service;
+        string netLine = info.TargetIsUp
+            ? ("当前联网状态：正在连接网络 (" + (info.ActiveAdapterName ?? "已连接") + ")")
+            : "当前联网状态：未连接（不会影响电脑当前正在使用的网络）";
+        string detailsText =
+            "识别型号：" + info.Target.Name + " (" + info.Target.PidHex + ", 接口: " + info.Target.InterfaceLabel + ")\r\n" +
+            "设备名称：" + (info.FriendlyName ?? info.Target.Name) + "\r\n" +
+            "实例 ID ：" + (info.DeviceId ?? "") + "\r\n" +
+            "当前驱动：" + svcDisplay + "\r\n" +
+            netLine;
+
+        var details = new TextBox
+        {
+            Text = detailsText,
+            ReadOnly = true,
+            Multiline = true,
+            BorderStyle = BorderStyle.FixedSingle,
+            BackColor = SystemColors.Window,
+            Location = new Point(18, 46),
+            Size = new Size(484, 96),
+        };
+
+        string riskText;
+        Color riskBack;
+        Color riskFore;
+        if (info.WouldLoseAllNetwork)
+        {
+            riskText = "⚠ 高危提示：这张网卡当前正在联网，且未检测到其他已连接网络！\r\n" +
+                       "绑定 WinUSB 后此网卡将无法连接普通 Wi-Fi，继续操作会导致电脑立即断网。";
+            riskBack = Color.FromArgb(254, 226, 226);
+            riskFore = Color.FromArgb(153, 27, 27);
+        }
+        else if (info.TargetIsUp)
+        {
+            riskText = "注意：这张网卡当前处于已连接状态；绑定 WinUSB 后将专用于 DropBridge，\r\n" +
+                       "电脑将改用其他已连接网络上网。";
+            riskBack = Color.FromArgb(254, 243, 199);
+            riskFore = Color.FromArgb(146, 64, 14);
+        }
+        else
+        {
+            riskText = "✓ 安全提示：该网卡当前未用于上网，且仅接管上述专用网卡，\r\n" +
+                       "不会改动电脑原有的 Intel / 板载 Wi-Fi 或有线网卡。";
+            riskBack = Color.FromArgb(220, 252, 231);
+            riskFore = Color.FromArgb(22, 101, 52);
+        }
+
+        var riskBox = new Label
+        {
+            Text = riskText,
+            BackColor = riskBack,
+            ForeColor = riskFore,
+            Padding = new Padding(8),
+            Location = new Point(18, 154),
+            Size = new Size(484, 54),
+        };
+
+        var notes = new Label
+        {
+            Text = "注意事项与可逆保障：\r\n" +
+                   "1. 绑定后该网卡将专用于 5 GHz AWDL 隔空投送，无法同时连接普通 Wi-Fi。\r\n" +
+                   "2. 建议直插机箱后置 USB 口；安装过程会弹出一次 Windows 管理员确认。\r\n" +
+                   "3. 随时可逆：可通过托盘菜单「恢复原厂 Wi-Fi 驱动…」或 setup\\Restore-WiFi.cmd 一键恢复。",
+            Location = new Point(18, 218),
+            Size = new Size(484, 72),
+        };
+
+        _ackBox = new CheckBox
+        {
+            Text = "我已知晓以上注意事项，确认仅对上述网卡安装 WinUSB 驱动",
+            Location = new Point(18, 296),
+            Size = new Size(484, 26),
+        };
+
+        _installButton = new Button
+        {
+            Text = "确认安装",
+            DialogResult = DialogResult.OK,
+            Enabled = false,
+            Location = new Point(312, 338),
+            Size = new Size(92, 30),
+        };
+
+        var cancelButton = new Button
+        {
+            Text = "取消",
+            DialogResult = DialogResult.Cancel,
+            Location = new Point(410, 338),
+            Size = new Size(92, 30),
+        };
+
+        _ackBox.CheckedChanged += delegate { _installButton.Enabled = _ackBox.Checked; };
+
+        Controls.Add(title);
+        Controls.Add(details);
+        Controls.Add(riskBox);
+        Controls.Add(notes);
+        Controls.Add(_ackBox);
+        Controls.Add(_installButton);
+        Controls.Add(cancelButton);
+
+        CancelButton = cancelButton;
+        if (!info.WouldLoseAllNetwork) AcceptButton = _installButton;
+        else ActiveControl = cancelButton;
+    }
+}
+
 internal static class RadioBinding
 {
     // Supported adapters:
@@ -1276,6 +1422,272 @@ internal static class RadioBinding
         bool bound = Bound(service);
         Log(logPath, "install: after pnputil, " + label + " service=" + (service ?? "<absent>"));
         return bound ? 0 : 1;
+    }
+
+    internal static bool AssessNetworkRisk(bool targetIsUp, bool hasOtherUpNetwork)
+    {
+        return targetIsUp && !hasOtherUpNetwork;
+    }
+
+    internal static bool IsTargetAdapterDescription(string description)
+    {
+        if (string.IsNullOrEmpty(description)) return false;
+        return description.IndexOf("8821", StringComparison.OrdinalIgnoreCase) >= 0 ||
+               description.IndexOf("8811", StringComparison.OrdinalIgnoreCase) >= 0;
+    }
+
+    internal static RadioInspection Inspect()
+    {
+        var info = new RadioInspection();
+        try
+        {
+            var clauses = new List<string>();
+            foreach (RadioTarget target in Targets)
+            {
+                clauses.Add("DeviceID LIKE '" + target.WqlLike + "'");
+            }
+            string query = "SELECT DeviceID, Name, Service FROM Win32_PnPEntity WHERE " +
+                           string.Join(" OR ", clauses);
+            using (var searcher = new ManagementObjectSearcher(query))
+            {
+                var found = new List<RadioInspection>();
+                foreach (ManagementObject item in searcher.Get())
+                {
+                    string deviceId = item["DeviceID"] as string;
+                    RadioTarget target = MatchTarget(deviceId);
+                    if (target == null) continue;
+                    found.Add(new RadioInspection
+                    {
+                        Target = target,
+                        DeviceId = deviceId,
+                        FriendlyName = (item["Name"] as string) ?? target.Name,
+                        Service = (item["Service"] as string) ?? string.Empty,
+                    });
+                }
+                foreach (RadioTarget preferred in Targets)
+                {
+                    foreach (RadioInspection candidate in found)
+                    {
+                        if (candidate.Target == preferred)
+                        {
+                            info = candidate;
+                            break;
+                        }
+                    }
+                    if (info.Target != null) break;
+                }
+            }
+        }
+        catch
+        {
+        }
+
+        try
+        {
+            var nics = System.Net.NetworkInformation.NetworkInterface.GetAllNetworkInterfaces();
+            foreach (var nic in nics)
+            {
+                if (nic.OperationalStatus != System.Net.NetworkInformation.OperationalStatus.Up) continue;
+                if (nic.NetworkInterfaceType == System.Net.NetworkInformation.NetworkInterfaceType.Loopback ||
+                    nic.NetworkInterfaceType == System.Net.NetworkInformation.NetworkInterfaceType.Tunnel)
+                {
+                    continue;
+                }
+                if (IsTargetAdapterDescription(nic.Description))
+                {
+                    info.TargetIsUp = true;
+                    info.ActiveAdapterName = nic.Name + " (" + nic.Description + ")";
+                }
+                else
+                {
+                    info.HasOtherUpNetwork = true;
+                }
+            }
+        }
+        catch
+        {
+        }
+        return info;
+    }
+
+    internal static List<string> ParsePublishedInfNames(string pnputilOutput, string originalInfName)
+    {
+        var result = new List<string>();
+        if (string.IsNullOrEmpty(pnputilOutput) || string.IsNullOrEmpty(originalInfName)) return result;
+        string currentPublished = null;
+        string[] lines = pnputilOutput.Split(new[] { '\r', '\n' }, StringSplitOptions.RemoveEmptyEntries);
+        foreach (string raw in lines)
+        {
+            string line = raw.Trim();
+            int colon = line.IndexOf(':');
+            if (colon < 0) continue;
+            string value = line.Substring(colon + 1).Trim();
+            if (value.EndsWith(".inf", StringComparison.OrdinalIgnoreCase))
+            {
+                if (value.StartsWith("oem", StringComparison.OrdinalIgnoreCase))
+                {
+                    currentPublished = value;
+                }
+                else if (string.Equals(value, originalInfName, StringComparison.OrdinalIgnoreCase) &&
+                         !string.IsNullOrEmpty(currentPublished))
+                {
+                    if (!result.Contains(currentPublished)) result.Add(currentPublished);
+                    currentPublished = null;
+                }
+            }
+        }
+        return result;
+    }
+
+    private static string ServiceWithDeviceId(out RadioTarget matched, out string deviceId)
+    {
+        matched = null;
+        deviceId = null;
+        try
+        {
+            var clauses = new List<string>();
+            foreach (RadioTarget target in Targets)
+            {
+                clauses.Add("DeviceID LIKE '" + target.WqlLike + "'");
+            }
+            string query = "SELECT DeviceID, Service FROM Win32_PnPEntity WHERE " +
+                           string.Join(" OR ", clauses);
+            using (var searcher = new ManagementObjectSearcher(query))
+            {
+                var found = new List<KeyValuePair<RadioTarget, KeyValuePair<string, string>>>();
+                foreach (ManagementObject item in searcher.Get())
+                {
+                    string id = item["DeviceID"] as string;
+                    RadioTarget target = MatchTarget(id);
+                    if (target == null) continue;
+                    string svc = (item["Service"] as string) ?? string.Empty;
+                    found.Add(new KeyValuePair<RadioTarget, KeyValuePair<string, string>>(
+                        target, new KeyValuePair<string, string>(id, svc)));
+                }
+                foreach (RadioTarget preferred in Targets)
+                {
+                    foreach (var entry in found)
+                    {
+                        if (entry.Key == preferred)
+                        {
+                            matched = entry.Key;
+                            deviceId = entry.Value.Key;
+                            return entry.Value.Value;
+                        }
+                    }
+                }
+            }
+        }
+        catch
+        {
+        }
+        return null;
+    }
+
+    /// <summary>
+    /// Remove DropBridge's WinUSB binding and re-enumerate the adapter so Windows
+    /// restores the vendor Realtek Wi-Fi driver. Elevates once if needed.
+    /// </summary>
+    internal static int Restore(string logPath)
+    {
+        RadioTarget matched;
+        string deviceId;
+        string service = ServiceWithDeviceId(out matched, out deviceId);
+        if (!IsAdmin())
+        {
+            try
+            {
+                var start = new ProcessStartInfo(Application.ExecutablePath)
+                {
+                    UseShellExecute = true,
+                    Verb = "runas",
+                    Arguments = "--restore-driver --log " + Supervisor.QuoteArgument(logPath),
+                };
+                using (Process child = Process.Start(start))
+                {
+                    child.WaitForExit();
+                    Log(logPath, "restore: elevated helper exit " + child.ExitCode);
+                    return child.ExitCode;
+                }
+            }
+            catch (Exception error)
+            {
+                Log(logPath, "restore: elevation refused: " + error.Message);
+                return 2;
+            }
+        }
+
+        string enumOut;
+        RunCapture("pnputil.exe", "/enum-drivers", logPath, out enumOut);
+        List<string> published = ParsePublishedInfNames(enumOut, "airbridge-winusb.inf");
+        foreach (string oemInf in published)
+        {
+            Run("pnputil.exe", "/delete-driver " + oemInf + " /uninstall /force", logPath);
+        }
+
+        service = ServiceWithDeviceId(out matched, out deviceId);
+        if (service != null && Bound(service) && !string.IsNullOrEmpty(deviceId))
+        {
+            Run("pnputil.exe", "/remove-device \"" + deviceId + "\"", logPath);
+            Run("pnputil.exe", "/scan-devices", logPath);
+            for (int attempt = 0; attempt < 10; attempt++)
+            {
+                Thread.Sleep(500);
+                service = ServiceWithDeviceId(out matched, out deviceId);
+                if (service != null && !Bound(service)) break;
+            }
+        }
+        else if (published.Count > 0)
+        {
+            Run("pnputil.exe", "/scan-devices", logPath);
+        }
+
+        service = ServiceWithDeviceId(out matched, out deviceId);
+        Log(logPath, "restore: final service=" + (service ?? "<absent>"));
+        if (service == null) return 3;
+        return Bound(service) ? 1 : 0;
+    }
+
+    private static int RunCapture(string exe, string arguments, string logPath, out string captured)
+    {
+        captured = string.Empty;
+        try
+        {
+            var start = new ProcessStartInfo(exe, arguments)
+            {
+                UseShellExecute = false,
+                RedirectStandardOutput = true,
+                RedirectStandardError = true,
+                CreateNoWindow = true,
+            };
+            using (Process process = Process.Start(start))
+            {
+                System.Threading.Tasks.Task<string> stdout = process.StandardOutput.ReadToEndAsync();
+                System.Threading.Tasks.Task<string> stderr = process.StandardError.ReadToEndAsync();
+                if (!process.WaitForExit(120000))
+                {
+                    try { process.Kill(); }
+                    catch (Exception) { }
+                    return 1;
+                }
+                try
+                {
+                    System.Threading.Tasks.Task.WaitAll(new System.Threading.Tasks.Task[] { stdout, stderr }, 2000);
+                    if (stdout.IsCompleted) captured += stdout.Result;
+                    if (stderr.IsCompleted) captured += stderr.Result;
+                }
+                catch (Exception)
+                {
+                }
+                Log(logPath, exe + " " + arguments + " -> exit " + process.ExitCode);
+                return process.ExitCode;
+            }
+        }
+        catch (Exception error)
+        {
+            Log(logPath, exe + " failed: " + error.Message);
+            return 1;
+        }
     }
 
     private static int Run(string exe, string arguments, string logPath)
@@ -1589,6 +2001,8 @@ internal sealed class TrayApp : ApplicationContext
         menu.Items.Add(_autostart);
         menu.Items.Add(new ToolStripMenuItem("安装驱动（首次使用）", null,
             delegate { InstallDriver(); }));
+        menu.Items.Add(new ToolStripMenuItem("恢复原厂 Wi-Fi 驱动…", null,
+            delegate { RestoreDriver(); }) { ToolTipText = "卸载 WinUSB 绑定并恢复网卡原厂 Realtek Wi-Fi 驱动，恢复后该网卡可重新连接普通 Wi-Fi" });
         _nameItem = new ToolStripMenuItem("设备名称：" + _prefs.DeviceName + "…", null,
             delegate { RenameDevice(); }) { ToolTipText = "iPhone 隔空投送里显示的名字；改完立即生效并记住" };
         menu.Items.Add(_nameItem);
@@ -2465,27 +2879,54 @@ internal sealed class TrayApp : ApplicationContext
         {
             timer.Stop();
             timer.Dispose();
-            string service = RadioBinding.Service();
-            if (service == null)
+            RadioInspection info = RadioBinding.Inspect();
+            if (info.Target == null)
             {
                 _icon.ShowBalloonTip(6000, _icon.Text,
-                    "没找到 RTL8821CU / RTL8811CU 网卡：请直插机箱后面板的 USB 口。", ToolTipIcon.Warning);
+                    "没找到受支持的 RTL8821CU / RTL8811CU 网卡：请直插机箱后面板的 USB 口。", ToolTipIcon.Warning);
                 return;
             }
-            if (RadioBinding.Bound(service)) return;
+            if (RadioBinding.Bound(info.Service)) return;
 
-            DialogResult answer = MessageBox.Show(
-                "首次使用需要一次性安装驱动（把网卡的 Wi-Fi 接口绑定到 WinUSB）。\n\n" +
-                "点「是」后 Windows 会弹出一次管理员确认，安装完成后会自动继续。\n" +
-                "如果不想现在做，可以从托盘菜单选「安装驱动（首次使用）」。",
-                "DropBridge 首次使用", MessageBoxButtons.YesNo, MessageBoxIcon.Information);
-            if (answer == DialogResult.Yes) InstallDriver();
+            using (var dialog = new DriverSetupDialog(info))
+            {
+                if (dialog.ShowDialog() == DialogResult.OK) InstallDriver(true);
+            }
         };
         timer.Start();
     }
 
     private void InstallDriver()
     {
+        InstallDriver(false);
+    }
+
+    private void InstallDriver(bool alreadyConfirmed)
+    {
+        if (!alreadyConfirmed)
+        {
+            RadioInspection info = RadioBinding.Inspect();
+            if (info.Target == null)
+            {
+                MessageBox.Show(
+                    "没找到受支持的 RTL8821CU / RTL8811CU 网卡。\n" +
+                    "DropBridge 不会改动您电脑上的其他网卡。请直插机箱后面板的 USB 口后重试。",
+                    "DropBridge", MessageBoxButtons.OK, MessageBoxIcon.Warning);
+                return;
+            }
+            if (RadioBinding.Bound(info.Service))
+            {
+                MessageBox.Show(
+                    info.Target.Name + " (" + info.Target.InterfaceLabel + ") 已绑定到 WinUSB，无需重复安装。",
+                    "DropBridge", MessageBoxButtons.OK, MessageBoxIcon.Information);
+                return;
+            }
+            using (var dialog = new DriverSetupDialog(info))
+            {
+                if (dialog.ShowDialog() != DialogResult.OK) return;
+            }
+        }
+
         Cursor.Current = Cursors.WaitCursor;
         try
         {
@@ -2507,8 +2948,57 @@ internal sealed class TrayApp : ApplicationContext
             }
             else
             {
-                MessageBox.Show("驱动安装没有完成，详见：\n" + DriverLog,
-                    "DropBridge", MessageBoxButtons.OK, MessageBoxIcon.Error);
+                DialogResult revert = MessageBox.Show(
+                    "驱动安装没有完成，是否立即尝试恢复原厂 Wi-Fi 驱动状态？\n\n日志：\n" + DriverLog,
+                    "DropBridge", MessageBoxButtons.YesNo, MessageBoxIcon.Error);
+                if (revert == DialogResult.Yes) RestoreDriver(true);
+            }
+        }
+        finally
+        {
+            Cursor.Current = Cursors.Default;
+        }
+    }
+
+    private void RestoreDriver()
+    {
+        RestoreDriver(false);
+    }
+
+    private void RestoreDriver(bool skipConfirm)
+    {
+        if (!skipConfirm)
+        {
+            RadioInspection info = RadioBinding.Inspect();
+            string targetLabel = info.Target != null
+                ? (info.Target.Name + " (" + info.DeviceId + ")")
+                : "已安装的 DropBridge WinUSB 驱动包";
+            DialogResult confirm = MessageBox.Show(
+                "将卸载 WinUSB 绑定并恢复网卡原厂 Realtek Wi-Fi 驱动：\n" + targetLabel + "\n\n" +
+                "恢复后 DropBridge 后端将停止运行，网卡可重新连接普通 Wi-Fi。\n是否继续？",
+                "恢复原厂 Wi-Fi 驱动", MessageBoxButtons.YesNo, MessageBoxIcon.Question);
+            if (confirm != DialogResult.Yes) return;
+        }
+
+        _supervisor.StopAll();
+        Cursor.Current = Cursors.WaitCursor;
+        try
+        {
+            int code = RadioBinding.Restore(DriverLog);
+            if (code == 0)
+            {
+                MessageBox.Show("已恢复原厂 Wi-Fi 驱动，DropBridge 后端已停止。\n现在可以通过 Windows 连接普通 Wi-Fi。",
+                    "DropBridge", MessageBoxButtons.OK, MessageBoxIcon.Information);
+            }
+            else if (code == 2)
+            {
+                MessageBox.Show("需要管理员权限才能恢复驱动。\n也可以以管理员身份运行 setup\\Restore-WiFi.cmd。",
+                    "DropBridge", MessageBoxButtons.OK, MessageBoxIcon.Warning);
+            }
+            else
+            {
+                MessageBox.Show("恢复未完全确认，请查看日志或运行 setup\\Restore-WiFi.cmd：\n" + DriverLog,
+                    "DropBridge", MessageBoxButtons.OK, MessageBoxIcon.Warning);
             }
         }
         finally
@@ -3641,6 +4131,21 @@ internal static class Program
                             : installLog;
                         return RadioBinding.Install(resolved, quiet, log);
                     }
+                case "--restore-driver":
+                    {
+                        string restoreRoot = null;
+                        string restoreLog = null;
+                        for (int extra = index + 1; extra < args.Length; extra++)
+                        {
+                            if (args[extra] == "--root" && extra + 1 < args.Length) restoreRoot = args[++extra];
+                            else if (args[extra] == "--log" && extra + 1 < args.Length) restoreLog = args[++extra];
+                        }
+                        string resolved = ResolveRoot(restoreRoot);
+                        string log = string.IsNullOrEmpty(restoreLog)
+                            ? Path.Combine(resolved, "data", "logs", "driver-install.txt")
+                            : restoreLog;
+                        return RadioBinding.Restore(log);
+                    }
                 case "--autostart-on":
                     autostart = 1;
                     break;
@@ -3676,7 +4181,7 @@ internal static class Program
         {
             "--root", "--data", "--check", "--out", "--smoke", "--auto-exit",
             "--channel", "--width", "--chanseq", "--no-tcp-merge", "--allow-send",
-            "--autostart-on", "--autostart-off", "--install-driver", "--streams",
+            "--autostart-on", "--autostart-off", "--install-driver", "--restore-driver", "--streams",
         };
         if (args.Length > 0 && Array.IndexOf(knownSwitches, args[0]) < 0)
         {

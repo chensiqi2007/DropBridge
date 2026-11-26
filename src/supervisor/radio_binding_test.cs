@@ -32,6 +32,28 @@ internal static class RadioBindingTest
         Check(ref failures, !RadioBinding.Bound("RtlWlanu"), "RtlWlanu not bound");
         Check(ref failures, !RadioBinding.Bound(""), "empty service not bound");
 
+        Check(ref failures, RadioBinding.AssessNetworkRisk(true, false), "target up alone -> high risk");
+        Check(ref failures, !RadioBinding.AssessNetworkRisk(true, true), "target up with backup -> not sole network");
+        Check(ref failures, !RadioBinding.AssessNetworkRisk(false, false), "target down -> no disconnect risk");
+
+        Check(ref failures, RadioBinding.IsTargetAdapterDescription("Realtek 8811CU Wireless LAN 802.11ac USB NIC"),
+            "matches 8811CU description");
+        Check(ref failures, RadioBinding.IsTargetAdapterDescription("Realtek 8821CU Wireless LAN 802.11ac USB NIC"),
+            "matches 8821CU description");
+        Check(ref failures, !RadioBinding.IsTargetAdapterDescription("Intel(R) Wi-Fi 7 BE200 320MHz"),
+            "does not match Intel Wi-Fi");
+
+        string samplePnp =
+            "Published Name : oem12.inf\r\n" +
+            "Original Name : other.inf\r\n" +
+            "Published Name : oem45.inf\r\n" +
+            "Original Name : airbridge-winusb.inf\r\n" +
+            "发布名称 : oem99.inf\r\n" +
+            "原始名称 : airbridge-winusb.inf\r\n";
+        var parsed = RadioBinding.ParsePublishedInfNames(samplePnp, "airbridge-winusb.inf");
+        Check(ref failures, parsed.Count == 2 && parsed[0] == "oem45.inf" && parsed[1] == "oem99.inf",
+            "parses English and localized pnputil output");
+
         Console.WriteLine(failures == 0 ? "PASS radio_binding" : "FAIL radio_binding (" + failures + " case(s))");
         return failures == 0 ? 0 : 1;
     }

@@ -1,5 +1,13 @@
 # 工作记录 / 下一位 Agent 交接
 
+## 2026-11-26：Q72 Issue #11 安装前网卡识别确认弹窗与一键回退
+
+- **改动**：
+  - `src/supervisor/Program.cs`：新增 `RadioBinding.Inspect()`（识别目标型号、实例 ID、当前驱动服务及是否正在联网/有无其他备用网络）、`DriverSetupDialog` 前端确认弹窗（含高危断网警示、注意事项勾选解锁「确认安装」）、`RadioBinding.Restore()`、`--restore-driver`、托盘菜单「恢复原厂 Wi-Fi 驱动…」，以及安装失败时主动提示尝试恢复原状。
+  - `packaging/setup/Restore-WiFi.cmd` / `Restore-WiFi.ps1`：新增独立一键回退脚本（卸载 `airbridge-winusb.inf`、`pnputil /remove-device` + `/scan-devices`），并同步更新 `packaging/setup/README.txt` 与 `docs/BINDING_RUNBOOK.md`。
+  - `src/supervisor/radio_binding_test.cs`：补充 `AssessNetworkRisk`、`IsTargetAdapterDescription`、`ParsePublishedInfNames` 离线单测。
+- **验证**：`Build-Supervisor.ps1 -Test` 全部通过，`Restore-WiFi.ps1` PowerShell 语法解析通过。未执行真机换驱动或回退（待授权）。
+
 ## 2026-11-26：Q71 适配 RTL8811CU（0bda:c811）源码与驱动包
 
 - **本机硬件基线（只读）**：`USB\VID_0BDA&PID_C811\123456`，非复合设备（无 `MI_xx`，无蓝牙），当前驱动 `RtlWlanu` / `oem302.inf`（1030.52.1216.2025），直插 `USB\ROOT_HUB30`；ZeroCD `1a2b` 未出现；主机自带 `Intel(R) Wireless Bluetooth(R)` 与 `Intel(R) Wi-Fi 7 BE200`（主网络不受换驱动影响）。
