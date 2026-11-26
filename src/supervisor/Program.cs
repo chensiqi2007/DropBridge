@@ -2879,16 +2879,59 @@ internal sealed class TrayApp : ApplicationContext
     // thread; a burst of photos must not start 30 PowerShells at once.
     private readonly object _toastGate = new object();
 
+    private static void PlayReceivedSound()
+    {
+        try
+        {
+            string mediaDir = Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.Windows), "Media");
+            string[] candidates =
+            {
+                Path.Combine(mediaDir, "Windows Notify Messaging.wav"),
+                Path.Combine(mediaDir, "Windows Notify System Generic.wav"),
+                Path.Combine(mediaDir, "Windows Notify.wav"),
+            };
+            foreach (string wav in candidates)
+            {
+                if (File.Exists(wav))
+                {
+                    using (var player = new System.Media.SoundPlayer(wav))
+                    {
+                        player.Play();
+                    }
+                    return;
+                }
+            }
+            System.Media.SystemSounds.Asterisk.Play();
+        }
+        catch (Exception)
+        {
+        }
+    }
+
     // Runs on the file's waiter thread; only the balloons go to the UI thread.
     private void ShowReceived(string path, string name, long bytes)
     {
         if (_exiting) return;
         string extension = Path.GetExtension(name).ToLowerInvariant();
-        if (Array.IndexOf(PictureExtensions, extension) < 0)
+        if (Array.IndexOf(PictureExtensions, extension) < 0 &&
+            Array.IndexOf(MotionExtensions, extension) >= 0 &&
+            HasStillSibling(path, name))
         {
             // Q64: the movie half of a Live Photo is announced by the picture's
-            // own toast, so do not add a second notification for it.
-            if (Array.IndexOf(MotionExtensions, extension) >= 0 && HasStillSibling(path, name)) return;
+            // own toast, so do not add a second notification or sound for it.
+            return;
+        }
+        if (_prefs.NotifySound)
+        {
+            PlayReceivedSound();
+        }
+        if (!_prefs.NotifyToast)
+        {
+            LogLine("received file (notification muted): " + name);
+            return;
+        }
+        if (Array.IndexOf(PictureExtensions, extension) < 0)
+        {
             LogLine("received file (balloon): " + name);
             // Q67: keep this short; the file is already on disk and the toast was
             // only telling the user that something arrived.
@@ -3095,6 +3138,8 @@ internal sealed class TrayApp : ApplicationContext
                 "\"logDirectory\":\"" + SendHelpers.JsonEscape(_supervisor.LogDirectory) + "\"," +
                 "\"beacon\":" + (_beaconWanted ? "true" : "false") + "," +
                 "\"stillCopy\":" + (_prefs.StillCopy ? "true" : "false") + "," +
+                "\"notifySound\":" + (_prefs.NotifySound ? "true" : "false") + "," +
+                "\"notifyToast\":" + (_prefs.NotifyToast ? "true" : "false") + "," +
                 "\"autostart\":" + (AutostartEnabled() ? "true" : "false") + "," +
                 "\"sendTo\":" + (AppIdentity.HasSendToShortcut() ? "true" : "false") + "," +
                 "\"receiveMode\":\"" + SendHelpers.JsonEscape(_prefs.ReceiveMode) + "\"," +
@@ -3146,6 +3191,14 @@ internal sealed class TrayApp : ApplicationContext
         {
             bool want = cmd == "still_on";
             if (_prefs.StillCopy != want) ToggleStillCopy();
+        }
+        else if (cmd == "notify_sound_on" || cmd == "notify_sound_off")
+        {
+            _prefs.SetNotifySound(cmd == "notify_sound_on");
+        }
+        else if (cmd == "notify_toast_on" || cmd == "notify_toast_off")
+        {
+            _prefs.SetNotifyToast(cmd == "notify_toast_on");
         }
         else if (cmd == "autostart_on" || cmd == "autostart_off")
         {
@@ -4452,8 +4505,11 @@ internal sealed class Settings
     public string ReceiveMode { get; private set; }
     // Q77: "compatible" (JPEG/H.264) or "original" (HEIC/HEVC).
     public string MediaFormat { get; private set; }
+    // Q78: sound & bottom-right toast/balloon notification on received files.
+    public bool NotifySound { get; private set; }
+    public bool NotifyToast { get; private set; }
 
-    private Settings(string path, string deviceName, bool beacon, bool stillCopy, string receivedFolder, string receiveMode, string mediaFormat)
+    private Settings(string path, string deviceName, bool beacon, bool stillCopy, string receivedFolder, string receiveMode, string mediaFormat, bool notifySound, bool notifyToast)
     {
         _path = path;
         DeviceName = deviceName;
@@ -4462,6 +4518,8 @@ internal sealed class Settings
         ReceivedFolder = receivedFolder;
         ReceiveMode = NormalizeReceiveMode(receiveMode);
         MediaFormat = mediaFormat == "original" ? "original" : "compatible";
+        NotifySound = notifySound;
+        NotifyToast = notifyToast;
     }
 
     private static string NormalizeReceiveMode(string mode)
@@ -4481,6 +4539,8 @@ internal sealed class Settings
         string receivedFolder = "";
         string receiveMode = "auto";
         string mediaFormat = "compatible";
+        bool notifySound = true;
+        bool notifyToast = true;
         try
         {
             if (File.Exists(path))
@@ -4521,6 +4581,16 @@ internal sealed class Settings
                     {
                         mediaFormat = value.Equals("original", StringComparison.OrdinalIgnoreCase) ? "original" : "compatible";
                     }
+                    else if (key.Equals("notifySound", StringComparison.OrdinalIgnoreCase))
+                    {
+                        bool on;
+                        if (bool.TryParse(value, out on)) notifySound = on;
+                    }
+                    else if (key.Equals("notifyToast", StringComparison.OrdinalIgnoreCase))
+                    {
+                        bool on;
+                        if (bool.TryParse(value, out on)) notifyToast = on;
+                    }
                 }
             }
             else if (File.Exists(Path.Combine(dataDirectory, "beacon-off")))
@@ -4532,7 +4602,7 @@ internal sealed class Settings
         catch (Exception)
         {
         }
-        return new Settings(path, deviceName, beacon, stillCopy, receivedFolder, receiveMode, mediaFormat);
+        return new Settings(path, deviceName, beacon, stillCopy, receivedFolder, receiveMode, mediaFormat, notifySound, notifyToast);
     }
 
     public void SetDeviceName(string name)
@@ -4568,6 +4638,18 @@ internal sealed class Settings
     public void SetMediaFormat(string format)
     {
         MediaFormat = format == "original" ? "original" : "compatible";
+        Save();
+    }
+
+    public void SetNotifySound(bool enabled)
+    {
+        NotifySound = enabled;
+        Save();
+    }
+
+    public void SetNotifyToast(bool enabled)
+    {
+        NotifyToast = enabled;
         Save();
     }
 
@@ -4611,6 +4693,8 @@ internal sealed class Settings
                 text.AppendLine("receivedFolder=" + ReceivedFolder);
                 text.AppendLine("receiveMode=" + ReceiveMode);
                 text.AppendLine("mediaFormat=" + MediaFormat);
+                text.AppendLine("notifySound=" + (NotifySound ? "true" : "false"));
+                text.AppendLine("notifyToast=" + (NotifyToast ? "true" : "false"));
                 File.WriteAllText(_path, text.ToString(), new UTF8Encoding(false));
             }
             catch (Exception)

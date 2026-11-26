@@ -7,6 +7,10 @@ use std::path::{Path, PathBuf};
 use std::process::Command;
 use std::time::{Duration, Instant};
 
+fn default_true() -> bool {
+    true
+}
+
 #[derive(Debug, Clone, Default, Deserialize)]
 #[serde(rename_all = "camelCase")]
 struct StatusSnapshot {
@@ -17,6 +21,10 @@ struct StatusSnapshot {
     log_directory: String,
     beacon: bool,
     still_copy: bool,
+    #[serde(default = "default_true")]
+    notify_sound: bool,
+    #[serde(default = "default_true")]
+    notify_toast: bool,
     autostart: bool,
     send_to: bool,
     receive_mode: String,
@@ -609,6 +617,35 @@ impl DropBridgeApp {
                     "cmd=still_on"
                 } else {
                     "cmd=still_off"
+                });
+            }
+
+            ui.add_space(6.0);
+            ui.separator();
+            ui.add_space(4.0);
+            ui.label("接收提示与通知：");
+
+            let mut notify_sound = self.status.notify_sound;
+            if ui
+                .checkbox(&mut notify_sound, "收到文件时播放提示音")
+                .changed()
+            {
+                self.send_ui_cmd(if notify_sound {
+                    "cmd=notify_sound_on"
+                } else {
+                    "cmd=notify_sound_off"
+                });
+            }
+
+            let mut notify_toast = self.status.notify_toast;
+            if ui
+                .checkbox(&mut notify_toast, "收到文件时显示右下角系统通知（含图片复制按钮）")
+                .changed()
+            {
+                self.send_ui_cmd(if notify_toast {
+                    "cmd=notify_toast_on"
+                } else {
+                    "cmd=notify_toast_off"
                 });
             }
         });

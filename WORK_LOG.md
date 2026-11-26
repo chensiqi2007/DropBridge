@@ -1,5 +1,12 @@
 # 工作记录 / 下一位 Agent 交接
 
+## 2026-11-27：Q78 接收提示音开关与右下角通知开关
+
+- **功能实现**：
+  - `src/supervisor/Program.cs`：`Settings` 新增 `NotifySound` 与 `NotifyToast`（默认均开启），持久化至 `settings.ini` 并在 `data\status.json` 中暴露 `notifySound` / `notifyToast`。`ShowReceived` 在非实况图伴生视频时按开关播放 Windows 通知音（`Windows Notify Messaging.wav` 等回退 `SystemSounds.Asterisk`）并独立控制右下角 Toast/气泡通知；`HandleUiCommand` 新增 `notify_sound_on/off` 与 `notify_toast_on/off`。
+  - `src/ui_rust/src/main.rs`：「设置与静默自启」页面新增「收到文件时播放提示音」与「收到文件时显示右下角系统通知（含图片复制按钮）」两个复选框。
+- **验证**：`Build-Supervisor.ps1 -Test`、`Build-UiRust.ps1` 与便携版/无头版/单文件 `dist\DropBridge.exe`（23.3 MB）重打包全部通过；同时用户确认 Q77 真机双向发现与传输已成功。
+
 ## 2026-11-26：Q77 参考 NekoDrop 优化数据面调度、BLE 唤醒、5G 信道探测与接收策略
 
 - **数据面防饿死与高吞吐（`patches/awdl-ipc-host.patch` / `upstream/winawdl`）**：
