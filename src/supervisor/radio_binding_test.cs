@@ -88,6 +88,14 @@ internal static class RadioBindingTest
             try { System.IO.Directory.Delete(tmpDir, true); } catch (Exception) { }
         }
 
+        // Q75: silent autostart & Rust UI activation URI parsing
+        Check(ref failures, TrayApp.AutostartValue().EndsWith(" --silent"),
+            "autostart command includes --silent");
+        Check(ref failures, Activation.IsUiUri("dropbridge://ui?cmd=rename&name=My%20PC"),
+            "IsUiUri detects ui protocol");
+        Check(ref failures, Activation.QueryParam("dropbridge://ui?cmd=rename&name=My%20PC", "name") == "My PC",
+            "QueryParam decodes name");
+
         Console.WriteLine(failures == 0 ? "PASS radio_binding" : "FAIL radio_binding (" + failures + " case(s))");
         return failures == 0 ? 0 : 1;
     }

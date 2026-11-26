@@ -49,6 +49,10 @@ foreach ($dir in 'backend\airdrop', 'tools', 'licenses', 'setup') {
 foreach ($file in @($radio, $bridge, $netd, $awdld, $libusb, $supervisor)) {
     Copy-Item $file (Join-Path $stage 'backend') -Force
 }
+$uiRust = Join-Path $root 'build\ui_rust\DropBridgeUI.exe'
+if (Test-Path $uiRust) {
+    Copy-Item $uiRust (Join-Path $stage 'DropBridgeUI.exe') -Force
+}
 
 # Q59e: the toast icon is resolved from this file (see AppIdentity.IconFile),
 # so the single-file payload has to carry it next to the supervisor.

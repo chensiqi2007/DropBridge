@@ -2510,6 +2510,8 @@ internal sealed class TrayApp : ApplicationContext
         _ui = SynchronizationContext.Current as WindowsFormsSynchronizationContext;
         _status = new ToolStripMenuItem("状态：启动中…") { Enabled = false };
         menu.Items.Add(_status);
+        menu.Items.Add(new ToolStripMenuItem("打开主界面", null,
+            delegate { OpenDashboard(); }));
         menu.Items.Add(new ToolStripMenuItem("发送文件到 iPhone…", null,
             delegate { OpenSendDialog(null); }) { ToolTipText = "通过隔空投送把电脑上的文件发给附近的 iPhone（需手机设为「所有人 10 分钟」）" });
         menu.Items.Add(new ToolStripMenuItem("打开接收文件夹", null,
@@ -2561,7 +2563,10 @@ internal sealed class TrayApp : ApplicationContext
             ContextMenuStrip = menu,
             Visible = true,
         };
-        _icon.DoubleClick += delegate { OpenFolder(_supervisor.ReceivedDirectory); };
+        _icon.DoubleClick += delegate
+        {
+            if (!OpenDashboard()) OpenFolder(_supervisor.ReceivedDirectory);
+        };
         SystemEvents.UserPreferenceChanged += OnUserPreferenceChanged;
 
         // Q62: the toast button talks back through a named pipe; the protocol and
@@ -2574,26 +2579,35 @@ internal sealed class TrayApp : ApplicationContext
             LogLine("notification registration failed: " + registrationError);
         }
 
-        if (_supervisor.UnavailableReceivedFolder != null)
+        if (!Program.SilentMode)
         {
-            _icon.ShowBalloonTip(8000, _icon.Text,
-                "接收文件夹 " + _supervisor.UnavailableReceivedFolder + " 现在不可用，本次改存到 " +
-                _supervisor.ReceivedDirectory + "。正在启动后端…", ToolTipIcon.Warning);
-        }
-        else
-        {
-            _icon.ShowBalloonTip(3000, _icon.Text, "正在启动后端…", ToolTipIcon.Info);
+            if (_supervisor.UnavailableReceivedFolder != null)
+            {
+                _icon.ShowBalloonTip(8000, _icon.Text,
+                    "接收文件夹 " + _supervisor.UnavailableReceivedFolder + " 现在不可用，本次改存到 " +
+                    _supervisor.ReceivedDirectory + "。正在启动后端…", ToolTipIcon.Warning);
+            }
+            else
+            {
+                _icon.ShowBalloonTip(3000, _icon.Text, "正在启动后端…", ToolTipIcon.Info);
+            }
         }
 
         Application.Idle += CaptureContext;
         StartWatcher();
         StartBackends();
-        StartFirstRunCheck();
+        if (!Program.SilentMode) StartFirstRunCheck();
         OfferAutostartOnce();
         StartBeacon();
+        WriteStatusJson();
+
+        if (!Program.SilentMode && autoExitSeconds <= 0 && string.IsNullOrEmpty(Program.PendingActivation))
+        {
+            OpenDashboard();
+        }
 
         _watchdog = new System.Windows.Forms.Timer { Interval = 5000 };
-        _watchdog.Tick += delegate { CheckSilence(); CheckChildren(); CheckBeacon(); };
+        _watchdog.Tick += delegate { CheckSilence(); CheckChildren(); CheckBeacon(); WriteStatusJson(); };
         _watchdog.Start();
 
         if (autoExitSeconds > 0)
@@ -2852,9 +2866,14 @@ internal sealed class TrayApp : ApplicationContext
         });
     }
 
-    /* Q62/Q74: handle dropbridge://copy?file=... or dropbridge://send?file=... */
+    /* Q62/Q74: handle dropbridge://copy?file=..., dropbridge://send?file=..., or dropbridge://ui?cmd=... */
     private void HandleActivation(string uri)
     {
+        if (Activation.IsUiUri(uri))
+        {
+            HandleUiCommand(uri);
+            return;
+        }
         if (Activation.IsSendUri(uri))
         {
             string[] files = Activation.FilesFromSendUri(uri);
@@ -2906,6 +2925,149 @@ internal sealed class TrayApp : ApplicationContext
         {
             return false;
         }
+    }
+
+    private bool OpenDashboard()
+    {
+        try
+        {
+            string uiExe = Path.Combine(_supervisor.Root, "DropBridgeUI.exe");
+            if (!File.Exists(uiExe))
+            {
+                string devExe = Path.GetFullPath(Path.Combine(_supervisor.Root, "build", "ui_rust", "DropBridgeUI.exe"));
+                if (File.Exists(devExe)) uiExe = devExe;
+            }
+            if (!File.Exists(uiExe)) return false;
+            Process.Start(new ProcessStartInfo(uiExe)
+            {
+                WorkingDirectory = _supervisor.Root,
+                UseShellExecute = true,
+            });
+            return true;
+        }
+        catch (Exception ex)
+        {
+            LogLine("open dashboard failed: " + ex.Message);
+            return false;
+        }
+    }
+
+    private void WriteStatusJson()
+    {
+        try
+        {
+            string dataDir = Path.Combine(_supervisor.Root, "data");
+            Directory.CreateDirectory(dataDir);
+            RadioInspection info = RadioBinding.Inspect();
+            string json =
+                "{" +
+                "\"running\":" + (_supervisor.Running ? "true" : "false") + "," +
+                "\"statusText\":\"" + SendHelpers.JsonEscape(_status.Text) + "\"," +
+                "\"deviceName\":\"" + SendHelpers.JsonEscape(_prefs.DeviceName) + "\"," +
+                "\"receivedFolder\":\"" + SendHelpers.JsonEscape(_supervisor.ReceivedDirectory) + "\"," +
+                "\"logDirectory\":\"" + SendHelpers.JsonEscape(_supervisor.LogDirectory) + "\"," +
+                "\"beacon\":" + (_beaconWanted ? "true" : "false") + "," +
+                "\"stillCopy\":" + (_prefs.StillCopy ? "true" : "false") + "," +
+                "\"autostart\":" + (AutostartEnabled() ? "true" : "false") + "," +
+                "\"sendTo\":" + (AppIdentity.HasSendToShortcut() ? "true" : "false") + "," +
+                "\"adapterName\":\"" + SendHelpers.JsonEscape(info.Target != null ? info.Target.Name : "") + "\"," +
+                "\"adapterPid\":\"" + SendHelpers.JsonEscape(info.Target != null ? info.Target.PidHex : "") + "\"," +
+                "\"deviceId\":\"" + SendHelpers.JsonEscape(info.DeviceId ?? "") + "\"," +
+                "\"driverService\":\"" + SendHelpers.JsonEscape(info.Service ?? "") + "\"," +
+                "\"winusbBound\":" + (RadioBinding.Bound(info.Service) ? "true" : "false") + "," +
+                "\"targetIsUp\":" + (info.TargetIsUp ? "true" : "false") + "," +
+                "\"wouldLoseAllNetwork\":" + (info.WouldLoseAllNetwork ? "true" : "false") + "," +
+                "\"pid\":" + Process.GetCurrentProcess().Id +
+                "}";
+            string target = Path.Combine(dataDir, "status.json");
+            string tmp = target + ".tmp";
+            File.WriteAllText(tmp, json, new UTF8Encoding(false));
+            if (File.Exists(target)) File.Replace(tmp, target, null);
+            else File.Move(tmp, target);
+        }
+        catch (Exception)
+        {
+        }
+    }
+
+    private void HandleUiCommand(string uri)
+    {
+        string cmd = Activation.QueryParam(uri, "cmd");
+        if (string.IsNullOrEmpty(cmd)) return;
+        if (cmd == "restart")
+        {
+            StartBackends();
+        }
+        else if (cmd == "reset")
+        {
+            _slowSamples = 0;
+            _slowWarned = false;
+            RequestStart(false);
+        }
+        else if (cmd == "beacon_on" || cmd == "beacon_off")
+        {
+            bool want = cmd == "beacon_on";
+            if (_beaconWanted != want) ToggleBeacon();
+        }
+        else if (cmd == "still_on" || cmd == "still_off")
+        {
+            bool want = cmd == "still_on";
+            if (_prefs.StillCopy != want) ToggleStillCopy();
+        }
+        else if (cmd == "autostart_on" || cmd == "autostart_off")
+        {
+            bool want = cmd == "autostart_on";
+            SetAutostart(want);
+            _autostart.Checked = want;
+        }
+        else if (cmd == "sendto_on" || cmd == "sendto_off")
+        {
+            bool want = cmd == "sendto_on";
+            string unused;
+            AppIdentity.SetSendToShortcut(want, out unused);
+            if (_sendToItem != null) _sendToItem.Checked = AppIdentity.HasSendToShortcut();
+        }
+        else if (cmd == "open_received")
+        {
+            OpenFolder(_supervisor.ReceivedDirectory);
+        }
+        else if (cmd == "open_logs")
+        {
+            OpenFolder(_supervisor.LogDirectory);
+        }
+        else if (cmd == "rename")
+        {
+            string clean = Settings.CleanName(Activation.QueryParam(uri, "name"));
+            if (clean != null && clean != _prefs.DeviceName)
+            {
+                _prefs.SetDeviceName(clean);
+                _nameItem.Text = "设备名称：" + clean + "…";
+                _icon.Text = clean;
+                AppIdentity.Ensure(clean);
+                RestartReceiverOnly();
+            }
+        }
+        else if (cmd == "set_folder")
+        {
+            string folder = Activation.QueryParam(uri, "folder");
+            string clean = Settings.CleanFolder(folder);
+            if (clean != null)
+            {
+                string error;
+                if (_supervisor.SetReceivedFolder(clean, out error))
+                {
+                    _folderItem.Text = "接收文件夹：" + ShortPath(_supervisor.ReceivedDirectory) + "…";
+                    StartWatcher();
+                    RestartReceiverOnly();
+                }
+            }
+        }
+        else if (cmd == "exit")
+        {
+            Exit();
+            return;
+        }
+        WriteStatusJson();
     }
 
     private void OpenSendDialog(string[] initialFiles)
@@ -3945,7 +4107,7 @@ internal sealed class TrayApp : ApplicationContext
             string here = Path.GetDirectoryName(Application.ExecutablePath);
             if (Directory.Exists(Path.Combine(here, "backend")))
             {
-                return "\"" + Application.ExecutablePath + "\"";
+                return "\"" + Application.ExecutablePath + "\" --silent";
             }
             string build = Path.GetDirectoryName(here);
             string appRoot = Path.GetDirectoryName(build);
@@ -3953,13 +4115,13 @@ internal sealed class TrayApp : ApplicationContext
             foreach (string name in new[] { "DropBridge.exe", "AirBridge32.exe" })
             {
                 string stub = Path.Combine(folder, name);
-                if (File.Exists(stub)) return "\"" + stub + "\"";
+                if (File.Exists(stub)) return "\"" + stub + "\" --silent";
             }
         }
         catch (ArgumentException)
         {
         }
-        return "\"" + Application.ExecutablePath + "\"";
+        return "\"" + Application.ExecutablePath + "\" --silent";
     }
 
     private static bool AutostartEnabled()
@@ -4490,6 +4652,32 @@ internal static class Activation
         thread.Start();
     }
 
+    public static bool IsUiUri(string uri)
+    {
+        return !string.IsNullOrEmpty(uri) &&
+               uri.StartsWith(Scheme + "ui", StringComparison.OrdinalIgnoreCase);
+    }
+
+    public static string QueryParam(string uri, string key)
+    {
+        try
+        {
+            var parsed = new Uri(uri);
+            string query = parsed.Query.TrimStart('?');
+            foreach (string pair in query.Split('&'))
+            {
+                int at = pair.IndexOf('=');
+                if (at <= 0) continue;
+                if (!pair.Substring(0, at).Equals(key, StringComparison.OrdinalIgnoreCase)) continue;
+                return Uri.UnescapeDataString(pair.Substring(at + 1).Replace("+", "%2B"));
+            }
+        }
+        catch (Exception)
+        {
+        }
+        return null;
+    }
+
     public static bool IsSendUri(string uri)
     {
         return !string.IsNullOrEmpty(uri) &&
@@ -4707,6 +4895,7 @@ internal static class Program
     /* Set when the process was started by the toast button and no tray was
      * running yet; TrayApp replays it once the UI is up. */
     internal static string PendingActivation;
+    internal static bool SilentMode;
 
     [STAThread]
     private static int Main(string[] args)
@@ -4838,6 +5027,9 @@ internal static class Program
                 case "--autostart-off":
                     autostart = -1;
                     break;
+                case "--silent":
+                    SilentMode = true;
+                    break;
             }
         }
 
@@ -4867,7 +5059,7 @@ internal static class Program
         {
             "--root", "--data", "--check", "--out", "--smoke", "--auto-exit",
             "--channel", "--width", "--chanseq", "--no-tcp-merge", "--allow-send", "--no-send", "--send",
-            "--autostart-on", "--autostart-off", "--install-driver", "--restore-driver", "--streams",
+            "--autostart-on", "--autostart-off", "--install-driver", "--restore-driver", "--streams", "--silent",
         };
         if (args.Length > 0 && Array.IndexOf(knownSwitches, args[0]) < 0)
         {

@@ -1,5 +1,11 @@
 # 工作记录 / 下一位 Agent 交接
 
+## 2026-11-26：Q75 Rust 原生前端页面（DropBridgeUI.exe）与静默开机自启
+
+- **Rust 前端（`src/ui_rust/`）**：使用 `eframe` + `rfd` 编写 `DropBridgeUI.exe`（4.2 MB，无外部运行时依赖，自动加载微软雅黑），提供「收发使用」（状态、重启/重置、打开接收目录、选择或拖拽文件发送）、「安装与驱动」（网卡识别、高危断网提示、一键安装/恢复）、「设置与静默自启」（开机静默自启、右键发送到、改名、改目录、Beacon、实况图副本）。
+- **静默自启与联动（`src/supervisor/Program.cs`）**：`AutostartValue()` 改为带 `--silent` 参数；`--silent` 启动时不弹出主页面和启动气泡；托盘实时写 `data\status.json` 并通过 `dropbridge://ui?cmd=...` 响应前端控制；正常双击 `DropBridge.exe` 或双击托盘自动打开 `DropBridgeUI.exe`。
+- **验证**：`Build-Supervisor.ps1 -Test` 与 `Build-UiRust.ps1` 通过；重打便携版、headless 与单文件包，`--check` exit 0。
+
 ## 2026-11-26：Q73/Q74 双向传输（PC → iPhone 发送匿名 TLS 与托盘发送窗口）
 
 - **根因与协议修复（Q73）**：对照 AirDrop 协议确认 iPhone 在「所有人（10 分钟）」模式下接受**无客户端证书**的匿名 TLS 连接，而原 `tools/airdrop_send.py` 复用 `sender.client_context()` 主动出示自签证书会触发证书拒绝。改为 `anonymous_client_context()`，并新增打包路径探测、`--json` 交互会话模式与端口刷新重试。

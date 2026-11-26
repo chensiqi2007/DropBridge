@@ -1,0 +1,553 @@
+#![windows_subsystem = "windows"]
+
+use eframe::egui;
+use serde::Deserialize;
+use std::fs;
+use std::path::{Path, PathBuf};
+use std::process::Command;
+use std::time::{Duration, Instant};
+
+#[derive(Debug, Clone, Default, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct StatusSnapshot {
+    running: bool,
+    status_text: String,
+    device_name: String,
+    received_folder: String,
+    log_directory: String,
+    beacon: bool,
+    still_copy: bool,
+    autostart: bool,
+    send_to: bool,
+    adapter_name: String,
+    adapter_pid: String,
+    device_id: String,
+    driver_service: String,
+    winusb_bound: bool,
+    target_is_up: bool,
+    would_lose_all_network: bool,
+    pid: u32,
+}
+
+#[derive(PartialEq, Eq, Clone, Copy)]
+enum Tab {
+    Home,
+    Driver,
+    Settings,
+}
+
+struct DropBridgeApp {
+    root: PathBuf,
+    tab: Tab,
+    status: StatusSnapshot,
+    last_poll: Instant,
+    name_input: String,
+    name_dirty: bool,
+    driver_ack: bool,
+    toast_msg: String,
+}
+
+impl DropBridgeApp {
+    fn new(cc: &eframe::CreationContext<'_>, root: PathBuf) -> Self {
+        install_chinese_font(&cc.egui_ctx);
+        let status = read_status(&root);
+        let name_input = if status.device_name.is_empty() {
+            "DropBridge".to_string()
+        } else {
+            status.device_name.clone()
+        };
+        Self {
+            root,
+            tab: Tab::Home,
+            status,
+            last_poll: Instant::now() - Duration::from_secs(5),
+            name_input,
+            name_dirty: false,
+            driver_ack: false,
+            toast_msg: String::new(),
+        }
+    }
+
+    fn supervisor_exe(&self) -> PathBuf {
+        let direct = self.root.join("DropBridge.exe");
+        if direct.exists() {
+            return direct;
+        }
+        let dev = self
+            .root
+            .join("build")
+            .join("supervisor")
+            .join("Release")
+            .join("DropBridge.exe");
+        if dev.exists() {
+            return dev;
+        }
+        direct
+    }
+
+    fn send_ui_cmd(&mut self, query: &str) {
+        let exe = self.supervisor_exe();
+        if !exe.exists() {
+            self.toast_msg = format!("未找到 {:?}", exe);
+            return;
+        }
+        let uri = format!("dropbridge://ui?{}", query);
+        let _ = Command::new(&exe).arg(uri).spawn();
+        self.last_poll = Instant::now() - Duration::from_secs(5);
+    }
+
+    fn launch_send(&mut self, files: &[String]) {
+        let exe = self.supervisor_exe();
+        if !exe.exists() {
+            self.toast_msg = format!("未找到 {:?}", exe);
+            return;
+        }
+        let mut cmd = Command::new(&exe);
+        cmd.arg("--send");
+        for f in files {
+            cmd.arg(f);
+        }
+        let _ = cmd.spawn();
+    }
+
+    fn run_driver_action(&mut self, arg: &str) {
+        let exe = self.supervisor_exe();
+        if !exe.exists() {
+            self.toast_msg = format!("未找到 {:?}", exe);
+            return;
+        }
+        let log = self.root.join("data").join("logs").join("driver-install.txt");
+        let _ = Command::new(&exe)
+            .arg(arg)
+            .arg("--root")
+            .arg(&self.root)
+            .arg("--log")
+            .arg(&log)
+            .spawn();
+        self.toast_msg = "已发起驱动操作，请按系统管理员提示确认。".to_string();
+    }
+
+    fn ensure_backend_silent(&mut self) {
+        let exe = self.supervisor_exe();
+        if exe.exists() {
+            let _ = Command::new(&exe).arg("--silent").spawn();
+            self.toast_msg = "正在后台启动托盘服务…".to_string();
+        }
+    }
+}
+
+impl eframe::App for DropBridgeApp {
+    fn update(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
+        if self.last_poll.elapsed() >= Duration::from_millis(800) {
+            self.last_poll = Instant::now();
+            self.status = read_status(&self.root);
+            if !self.name_dirty && !self.status.device_name.is_empty() {
+                self.name_input = self.status.device_name.clone();
+            }
+        }
+        ctx.request_repaint_after(Duration::from_millis(900));
+
+        // Handle drag & drop files anywhere on the window
+        let dropped: Vec<String> = ctx.input(|i| {
+            i.raw
+                .dropped_files
+                .iter()
+                .filter_map(|f| f.path.as_ref().map(|p| p.to_string_lossy().to_string()))
+                .collect()
+        });
+        if !dropped.is_empty() {
+            self.launch_send(&dropped);
+        }
+
+        egui::TopBottomPanel::top("top_nav").show(ctx, |ui| {
+            ui.add_space(6.0);
+            ui.horizontal(|ui| {
+                ui.heading("DropBridge");
+                ui.add_space(12.0);
+                ui.selectable_value(&mut self.tab, Tab::Home, "收发使用");
+                ui.selectable_value(&mut self.tab, Tab::Driver, "安装与驱动");
+                ui.selectable_value(&mut self.tab, Tab::Settings, "设置与静默自启");
+            });
+            ui.add_space(6.0);
+        });
+
+        egui::TopBottomPanel::bottom("bottom_bar").show(ctx, |ui| {
+            ui.add_space(4.0);
+            ui.horizontal(|ui| {
+                if !self.toast_msg.is_empty() {
+                    ui.label(&self.toast_msg);
+                } else {
+                    ui.label("关闭此窗口后，DropBridge 仍会在系统托盘静默运行。");
+                }
+                ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                    if ui.button("完全退出服务").clicked() {
+                        self.send_ui_cmd("cmd=exit");
+                        ctx.send_viewport_cmd(egui::ViewportCommand::Close);
+                    }
+                });
+            });
+            ui.add_space(4.0);
+        });
+
+        egui::CentralPanel::default().show(ctx, |ui| {
+            egui::ScrollArea::vertical().show(ui, |ui| {
+                match self.tab {
+                    Tab::Home => self.ui_home(ui),
+                    Tab::Driver => self.ui_driver(ui),
+                    Tab::Settings => self.ui_settings(ui),
+                }
+            });
+        });
+    }
+}
+
+impl DropBridgeApp {
+    fn ui_home(&mut self, ui: &mut egui::Ui) {
+        ui.group(|ui| {
+            ui.set_min_width(ui.available_width());
+            ui.heading("运行状态");
+            ui.add_space(4.0);
+            let status_line = if self.status.status_text.is_empty() {
+                "托盘服务未运行或正在初始化".to_string()
+            } else {
+                self.status.status_text.clone()
+            };
+            let color = if self.status.running {
+                egui::Color32::from_rgb(22, 163, 74)
+            } else {
+                egui::Color32::from_rgb(217, 119, 6)
+            };
+            ui.colored_label(color, status_line);
+            ui.label(format!(
+                "设备名称：{}   |   驱动：{}",
+                if self.status.device_name.is_empty() {
+                    "DropBridge"
+                } else {
+                    &self.status.device_name
+                },
+                if self.status.winusb_bound {
+                    "WinUSB 已就绪"
+                } else if self.status.adapter_name.is_empty() {
+                    "未检测到受支持网卡"
+                } else {
+                    "尚未绑定 WinUSB（请前往“安装与驱动”）"
+                }
+            ));
+            ui.add_space(6.0);
+            ui.horizontal(|ui| {
+                if self.status.pid == 0 {
+                    if ui.button("后台启动托盘服务").clicked() {
+                        self.ensure_backend_silent();
+                    }
+                } else {
+                    if ui.button("重新启动后端").clicked() {
+                        self.send_ui_cmd("cmd=restart");
+                    }
+                    if ui.button("重置链路").clicked() {
+                        self.send_ui_cmd("cmd=reset");
+                    }
+                }
+                if ui.button("打开日志").clicked() {
+                    self.send_ui_cmd("cmd=open_logs");
+                }
+            });
+        });
+
+        ui.add_space(10.0);
+
+        ui.group(|ui| {
+            ui.set_min_width(ui.available_width());
+            ui.heading("接收文件（iPhone → 电脑）");
+            ui.label("在 iPhone 分享面板选择「隔空投送」→ DropBridge，无需更改手机接收范围。");
+            ui.label(format!(
+                "保存位置：{}",
+                if self.status.received_folder.is_empty() {
+                    "data\\received"
+                } else {
+                    &self.status.received_folder
+                }
+            ));
+            ui.add_space(4.0);
+            if ui.button("打开接收文件夹").clicked() {
+                self.send_ui_cmd("cmd=open_received");
+            }
+        });
+
+        ui.add_space(10.0);
+
+        ui.group(|ui| {
+            ui.set_min_width(ui.available_width());
+            ui.heading("发送文件（电脑 → iPhone）");
+            ui.label("请先将 iPhone 隔空投送临时设为「所有人（10 分钟）」。也可以直接把文件拖进本窗口。");
+            ui.add_space(4.0);
+            ui.horizontal(|ui| {
+                if ui.button("选择文件并发送…").clicked() {
+                    if let Some(paths) = rfd::FileDialog::new().pick_files() {
+                        let strs: Vec<String> =
+                            paths.into_iter().map(|p| p.to_string_lossy().to_string()).collect();
+                        self.launch_send(&strs);
+                    }
+                }
+                if ui.button("打开设备发现窗口").clicked() {
+                    self.launch_send(&[]);
+                }
+            });
+        });
+    }
+
+    fn ui_driver(&mut self, ui: &mut egui::Ui) {
+        ui.group(|ui| {
+            ui.set_min_width(ui.available_width());
+            ui.heading("专用无线网卡识别");
+            ui.add_space(4.0);
+            if self.status.adapter_name.is_empty() {
+                ui.colored_label(
+                    egui::Color32::from_rgb(217, 119, 6),
+                    "未检测到受支持的网卡（仅支持 RTL8821CU 0bda:c820 或 RTL8811CU 0bda:c811）。",
+                );
+                ui.label("DropBridge 不会改动您电脑上的其他无线或有线网卡。请直插主板后置 USB 口。");
+            } else {
+                ui.label(format!(
+                    "识别型号：{} ({})",
+                    self.status.adapter_name, self.status.adapter_pid
+                ));
+                ui.label(format!("实例 ID ：{}", self.status.device_id));
+                ui.label(format!(
+                    "当前驱动：{}",
+                    if self.status.driver_service.is_empty() {
+                        "无"
+                    } else {
+                        &self.status.driver_service
+                    }
+                ));
+            }
+        });
+
+        ui.add_space(10.0);
+
+        if !self.status.adapter_name.is_empty() && !self.status.winusb_bound {
+            ui.group(|ui| {
+                ui.set_min_width(ui.available_width());
+                ui.heading("绑定 WinUSB 驱动（首次使用）");
+                if self.status.would_lose_all_network {
+                    ui.colored_label(
+                        egui::Color32::from_rgb(220, 38, 38),
+                        "⚠ 高危警告：该网卡当前正在联网，且未检测到其他已连接网络！绑定后将无法连普通 Wi-Fi，继续操作会导致断网。",
+                    );
+                } else if self.status.target_is_up {
+                    ui.colored_label(
+                        egui::Color32::from_rgb(217, 119, 6),
+                        "注意：该网卡当前处于已连接状态；绑定后将专用于 DropBridge，电脑会改用其他网络。",
+                    );
+                } else {
+                    ui.colored_label(
+                        egui::Color32::from_rgb(22, 163, 74),
+                        "✓ 该网卡当前未用于上网，绑定不会影响电脑现有网络。",
+                    );
+                }
+                ui.add_space(6.0);
+                ui.checkbox(
+                    &mut self.driver_ack,
+                    "我已知晓绑定后该网卡将专用于 DropBridge，且随时可一键恢复原厂 Wi-Fi 驱动",
+                );
+                ui.add_space(4.0);
+                ui.add_enabled_ui(self.driver_ack, |ui| {
+                    if ui.button("一键安装 WinUSB 驱动").clicked() {
+                        self.run_driver_action("--install-driver");
+                    }
+                });
+            });
+        } else if self.status.winusb_bound {
+            ui.group(|ui| {
+                ui.set_min_width(ui.available_width());
+                ui.heading("驱动状态：已绑定 WinUSB");
+                ui.label("如需让该 USB 网卡重新连接普通 Wi-Fi，可随时一键恢复。");
+                ui.add_space(4.0);
+                if ui.button("一键恢复原厂 Wi-Fi 驱动").clicked() {
+                    self.run_driver_action("--restore-driver");
+                }
+            });
+        }
+    }
+
+    fn ui_settings(&mut self, ui: &mut egui::Ui) {
+        ui.group(|ui| {
+            ui.set_min_width(ui.available_width());
+            ui.heading("静默开机自启与系统集成");
+            ui.add_space(4.0);
+            let mut autostart = self.status.autostart;
+            if ui
+                .checkbox(
+                    &mut autostart,
+                    "开机自启动（静默运行：不出现主界面，仅在系统托盘后台待命）",
+                )
+                .changed()
+            {
+                self.send_ui_cmd(if autostart {
+                    "cmd=autostart_on"
+                } else {
+                    "cmd=autostart_off"
+                });
+            }
+
+            let mut send_to = self.status.send_to;
+            if ui
+                .checkbox(&mut send_to, "添加到资源管理器右键「发送到」菜单")
+                .changed()
+            {
+                self.send_ui_cmd(if send_to {
+                    "cmd=sendto_on"
+                } else {
+                    "cmd=sendto_off"
+                });
+            }
+        });
+
+        ui.add_space(10.0);
+
+        ui.group(|ui| {
+            ui.set_min_width(ui.available_width());
+            ui.heading("隔空投送偏好设置");
+            ui.add_space(4.0);
+            ui.horizontal(|ui| {
+                ui.label("设备名称：");
+                if ui.text_edit_singleline(&mut self.name_input).changed() {
+                    self.name_dirty = true;
+                }
+                if ui.button("应用").clicked() {
+                    let encoded = url_encode(&self.name_input);
+                    self.name_dirty = false;
+                    self.send_ui_cmd(&format!("cmd=rename&name={}", encoded));
+                }
+            });
+
+            ui.add_space(4.0);
+            ui.horizontal(|ui| {
+                ui.label(format!(
+                    "接收目录：{}",
+                    if self.status.received_folder.is_empty() {
+                        "data\\received"
+                    } else {
+                        &self.status.received_folder
+                    }
+                ));
+                if ui.button("更改…").clicked() {
+                    if let Some(dir) = rfd::FileDialog::new().pick_folder() {
+                        let encoded = url_encode(&dir.to_string_lossy());
+                        self.send_ui_cmd(&format!("cmd=set_folder&folder={}", encoded));
+                    }
+                }
+            });
+
+            ui.add_space(4.0);
+            let mut beacon = self.status.beacon;
+            if ui
+                .checkbox(&mut beacon, "开启蓝牙 Beacon 广播（帮 iPhone 更快发现电脑）")
+                .changed()
+            {
+                self.send_ui_cmd(if beacon {
+                    "cmd=beacon_on"
+                } else {
+                    "cmd=beacon_off"
+                });
+            }
+
+            let mut still = self.status.still_copy;
+            if ui
+                .checkbox(&mut still, "收到实况照片时自动生成 -still.jpg 静图副本")
+                .changed()
+            {
+                self.send_ui_cmd(if still {
+                    "cmd=still_on"
+                } else {
+                    "cmd=still_off"
+                });
+            }
+        });
+    }
+}
+
+fn resolve_root() -> PathBuf {
+    if let Ok(exe) = std::env::current_exe() {
+        if let Some(dir) = exe.parent() {
+            if dir.join("backend").exists() || dir.join("data").exists() {
+                return dir.to_path_buf();
+            }
+            if let Some(p1) = dir.parent() {
+                if let Some(p2) = p1.parent() {
+                    if p2.join("src").exists() {
+                        return p2.to_path_buf();
+                    }
+                }
+            }
+            return dir.to_path_buf();
+        }
+    }
+    std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."))
+}
+
+fn read_status(root: &Path) -> StatusSnapshot {
+    let path = root.join("data").join("status.json");
+    if let Ok(text) = fs::read_to_string(&path) {
+        if let Ok(parsed) = serde_json::from_str::<StatusSnapshot>(&text) {
+            return parsed;
+        }
+    }
+    StatusSnapshot::default()
+}
+
+fn url_encode(s: &str) -> String {
+    let mut out = String::with_capacity(s.len());
+    for b in s.as_bytes() {
+        let ch = *b as char;
+        if ch.is_ascii_alphanumeric() || ch == '-' || ch == '_' || ch == '.' || ch == '~' {
+            out.push(ch);
+        } else {
+            out.push_str(&format!("%{:02X}", b));
+        }
+    }
+    out
+}
+
+fn install_chinese_font(ctx: &egui::Context) {
+    let mut fonts = egui::FontDefinitions::default();
+    for candidate in &[
+        r"C:\Windows\Fonts\msyh.ttc",
+        r"C:\Windows\Fonts\msyh.ttf",
+        r"C:\Windows\Fonts\simhei.ttf",
+    ] {
+        if let Ok(bytes) = fs::read(candidate) {
+            fonts.font_data.insert(
+                "cjk".to_owned(),
+                egui::FontData::from_owned(bytes),
+            );
+            fonts
+                .families
+                .entry(egui::FontFamily::Proportional)
+                .or_default()
+                .insert(0, "cjk".to_owned());
+            fonts
+                .families
+                .entry(egui::FontFamily::Monospace)
+                .or_default()
+                .push("cjk".to_owned());
+            break;
+        }
+    }
+    ctx.set_fonts(fonts);
+}
+
+fn main() -> eframe::Result<()> {
+    let root = resolve_root();
+    let options = eframe::NativeOptions {
+        viewport: egui::ViewportBuilder::default()
+            .with_inner_size([620.0, 500.0])
+            .with_min_inner_size([520.0, 420.0]),
+        ..Default::default()
+    };
+    eframe::run_native(
+        "DropBridge",
+        options,
+        Box::new(move |cc| Ok(Box::new(DropBridgeApp::new(cc, root)))),
+    )
+}

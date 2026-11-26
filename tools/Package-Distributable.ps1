@@ -59,6 +59,10 @@ foreach ($dir in 'backend', 'backend\airdrop', 'backend\python', 'tools', 'licen
 }
 
 Copy-Item $supervisor (Join-Path $stage 'DropBridge.exe') -Force
+$uiRust = Join-Path $root 'build\ui_rust\DropBridgeUI.exe'
+if (Test-Path $uiRust) {
+    Copy-Item $uiRust (Join-Path $stage 'DropBridgeUI.exe') -Force
+}
 
 # Q59e: Windows resolves the toast header icon from the AppUserModelId registration,
 # whose IconUri has to point at an image file; the exe path is not enough.
